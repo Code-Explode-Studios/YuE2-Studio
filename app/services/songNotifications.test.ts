@@ -5,6 +5,7 @@ import {
 } from './songNotifications';
 
 afterEach(() => {
+  setSongNotificationsEnabled(true);
   localStorage.removeItem(SONG_NOTIFICATIONS_KEY);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();

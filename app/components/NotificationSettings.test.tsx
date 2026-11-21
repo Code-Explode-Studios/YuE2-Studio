@@ -2,7 +2,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NotificationSettings } from './NotificationSettings';
-import { SONG_NOTIFICATIONS_KEY } from '../services/songNotifications';
+import { SONG_NOTIFICATIONS_KEY, setSongNotificationsEnabled } from '../services/songNotifications';
 
 vi.mock('../context/I18nContext', () => ({
   useI18n: () => ({ t: (key: string) => key }),
@@ -17,6 +17,7 @@ afterEach(() => {
   host?.remove();
   root = null;
   host = null;
+  setSongNotificationsEnabled(true);
   localStorage.removeItem(SONG_NOTIFICATIONS_KEY);
   vi.unstubAllGlobals();
 });
