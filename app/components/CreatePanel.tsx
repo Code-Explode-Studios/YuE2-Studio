@@ -1090,8 +1090,40 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
   };
 
   const [describing, setDescribing] = useState(false);
+  const [describeElapsed, setDescribeElapsed] = useState(0);
+  const [describeRuntime, setDescribeRuntime] = useState<{
+    device: 'GPU' | 'CPU';
+    seconds: number;
+    reason: string;
+    model: string;
+    installed: boolean;
+    gpu_name: string | null;
+    driver_major: number | null;
+  } | null>(null);
+  useEffect(() => {
+    if (mode !== 'cover' || (!coverSongId && !coverFile)) {
+      setDescribeRuntime(null);
+      return;
+    }
+    const controller = new AbortController();
+    void fetch('/v1/training/listen/runtime', { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(runtime => { if (!controller.signal.aborted) setDescribeRuntime(runtime); })
+      .catch(() => { if (!controller.signal.aborted) setDescribeRuntime(null); });
+    return () => controller.abort();
+  }, [mode, coverSongId, coverFile]);
+  useEffect(() => {
+    if (!describing) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setDescribeElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [describing]);
   const describeByEar = async () => {
     if (!coverSongId && !coverFile) return;
+    setDescribeElapsed(0);
     setDescribing(true);
     setError(null);
     try {
@@ -1757,9 +1789,36 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
             <p className="mt-2 text-[11px] leading-4 text-zinc-500">{tt('styleHint')}</p>
             <SongTextParts kind="style" value={style} onChange={setStyle} />
             {mode === 'cover' && (coverSongId || coverFile) && (
-              <button type="button" onClick={() => void describeByEar()} disabled={describing} className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:border-pink-400 hover:text-pink-600 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300" title={tt('describeByEarHint')}>
-                {describing ? <Loader2 size={12} className="animate-spin" /> : <Ear size={12} />}{tt('describeByEar')}
-              </button>
+              <div className="mt-2 space-y-1">
+                <button type="button" onClick={() => void describeByEar()} disabled={describing || describeRuntime?.installed === false} className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:border-pink-400 hover:text-pink-600 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300" title={tt('describeByEarHint')}>
+                  {describing ? <Loader2 size={12} className="animate-spin" /> : <Ear size={12} />}
+                  {tt('describeByEar')}
+                </button>
+                {describeRuntime && (
+                  <p className="text-[11px] text-zinc-500" role="status">
+                    {tt('describeByEarDevice').replace('{device}', describeRuntime.device).replace('{seconds}', String(Math.round(describeRuntime.seconds)))}
+                    {describeRuntime.reason === 'cuda13_unavailable' && (
+                      <span className="mt-1 block text-amber-600 dark:text-amber-300">
+                        {tt('describeByEarCudaWarning')}
+                      </span>
+                    )}
+                    {describeRuntime.reason === 'processor_selected' && (
+                      <span className="mt-1 block text-amber-600 dark:text-amber-300">{tt('describeByEarCpuSelected')}</span>
+                    )}
+                    {describeRuntime.reason === 'gpu_memory_or_backend' && (
+                      <span className="mt-1 block text-amber-600 dark:text-amber-300">{tt('describeByEarCpuFallback')}</span>
+                    )}
+                    {!describeRuntime.installed && (
+                      <span className="mt-1 block text-amber-600 dark:text-amber-300">{tt('describeByEarNotInstalled')}</span>
+                    )}
+                  </p>
+                )}
+                {describing && (
+                  <p role="status" className="text-[11px] text-zinc-500">
+                    {tt('describeByEarWorking').replace('{seconds}', String(describeElapsed))}
+                  </p>
+                )}
+              </div>
             )}
           </Card>
 

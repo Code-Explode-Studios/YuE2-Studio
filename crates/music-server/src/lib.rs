@@ -3388,7 +3388,14 @@ async fn training_pack_runtime(State(state): State<AppState>) -> Json<Value> {
 async fn listen_pack_runtime(State(state): State<AppState>) -> Json<Value> {
     let files = listen_files(&state);
     let ready = files.iter().all(|file| file["installed"].as_bool() == Some(true));
-    Json(pack_runtime(files, ready, listen_download(&state).await))
+    let mut pack = pack_runtime(files, ready, listen_download(&state).await);
+    // Also tell Create → Cover what its Describe-by-ear button will actually
+    // run. Reuse the existing listening-runtime route (and its MCP tool).
+    let runtime = prepare::describe_style_runtime(State(state)).await.0;
+    if let (Some(pack), Some(runtime)) = (pack.as_object_mut(), runtime.as_object()) {
+        pack.extend(runtime.clone());
+    }
+    Json(pack)
 }
 
 /// The listening pack's files and the ONNX Runtime its tempo model runs on: a

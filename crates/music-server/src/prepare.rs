@@ -334,6 +334,27 @@ pub async fn describe_recording_style(State(state): State<AppState>, mut multipa
     described
 }
 
+/// Runtime diagnostics for the button, including the reason a 12 GB NVIDIA
+/// card might still be running the MOSS captioner on the CPU.
+pub async fn describe_style_runtime(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let hardware = crate::hardware::hardware();
+    let chosen_processor = crate::processor_chosen(&state).await;
+    let runtime = listen::interactive_hearing(&hardware, chosen_processor);
+    let reason = if runtime.on_card { "gpu" }
+        else if chosen_processor { "processor_selected" }
+        else if hardware.nvidia && hardware.card_cuda != Some(crate::hardware::CudaBuild::Cuda13) { "cuda13_unavailable" }
+        else { "gpu_memory_or_backend" };
+    Json(serde_json::json!({
+        "device": if runtime.on_card { "GPU" } else { "CPU" },
+        "reason": reason,
+        "gpu_name": hardware.gpu_name,
+        "driver_major": hardware.driver_major,
+        "model": runtime.lm,
+        "seconds": runtime.seconds,
+        "installed": state.training.listen_ready(),
+    }))
+}
+
 async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: &str) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     if !state.training.listen_ready() {
         return Err(api_error(StatusCode::CONFLICT, "auto-describe (MOSS-Music) is not installed; install it on the training page".into()));
@@ -347,7 +368,8 @@ async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: 
     let hooks = crate::card_hooks(state).await;
     (hooks.take)().await;
     crate::release_assistant_unless_kept(state).await;
-    let hearing = listen::hearing(&crate::hardware::hardware(), crate::processor_chosen(state).await);
+    let hearing = listen::interactive_hearing(&crate::hardware::hardware(), crate::processor_chosen(state).await);
+    studio_log!("[describe by ear] {} via {}, analysing up to {} seconds", hearing.lm, if hearing.on_card { "GPU" } else { "CPU" }, hearing.seconds);
     let heard = async {
         if hearing.on_card && crate::hardware::hardware().card_cuda == Some(crate::hardware::CudaBuild::Cuda13) {
             state.engine_runtime.install_missing(Some(crate::hardware::CudaBuild::Cuda13)).await.context("install cuBLAS for the captioner")?;
@@ -358,7 +380,7 @@ async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: 
             let facts = audio_facts::Measurer::load(&facts_dir)?.measure_mono(&audio_facts::decode(&audio)?)?;
             let cancel = AtomicBool::new(false);
             let mut caption: Option<anyhow::Result<String>> = None;
-            listen::hear_batch(&captioner, &moss, &hearing, libraries.as_deref(), std::slice::from_ref(&audio), &cancel, |_, heard| caption = Some(heard))?;
+            listen::hear_batch_bounded(&captioner, &moss, &hearing, libraries.as_deref(), std::slice::from_ref(&audio), &cancel, std::time::Duration::from_secs(240), |_, heard| caption = Some(heard))?;
             let caption = caption.context("MOSS-Music wrote nothing for the song")??;
             Ok((listen::heard(&caption, &facts)?, facts))
         })
@@ -371,9 +393,22 @@ async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: 
     let note = training::HeardNote { genre: heard.genre.clone(), caption: heard.caption.clone(), bpm: facts.bpm };
     let style = if state.assistant.read().await.available() {
         let instrumental = lyrics.trim().is_empty();
-        let written = write_style(state, &heard, &facts, lyrics, instrumental).await;
+        let written = tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            write_style(state, &heard, &facts, lyrics, instrumental),
+        ).await;
         crate::release_assistant_unless_kept(state).await;
-        written.map_err(|error| api_error(StatusCode::BAD_GATEWAY, error))?
+        match written {
+            Ok(Ok(style)) => style,
+            Ok(Err(error)) => {
+                studio_log!("[describe by ear] writing assistant failed ({error}); using the heard caption");
+                heard_style(&note)
+            }
+            Err(_) => {
+                studio_log!("[describe by ear] writing assistant timed out; using the heard caption");
+                heard_style(&note)
+            }
+        }
     } else {
         heard_style(&note)
     };
