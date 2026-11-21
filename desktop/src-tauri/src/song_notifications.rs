@@ -39,10 +39,10 @@ fn wide_field<const N: usize>(value: &str) -> [u16; N] {
 fn show_windows_balloon(app: &tauri::AppHandle, message: &str) -> Result<(), String> {
     use tauri::Manager;
     use windows_sys::Win32::UI::Shell::{
-        Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_INFO, NIF_TIP,
+        Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
         NIM_ADD, NIM_MODIFY, NIIF_INFO,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{LoadIconW, IDI_APPLICATION};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{LoadIconW, IDI_APPLICATION, WM_APP};
 
     const ICON_ID: u32 = 0x59554532; // "YUE2"; separate from the optional keep-running tray icon
     let window = app.get_webview_window("main").ok_or("the main studio window is not available")?;
@@ -55,7 +55,8 @@ fn show_windows_balloon(app: &tauri::AppHandle, message: &str) -> Result<(), Str
     data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     data.hWnd = hwnd as _;
     data.uID = ICON_ID;
-    data.uFlags = NIF_ICON | NIF_TIP;
+    data.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    data.uCallbackMessage = WM_APP + 0x4A2;
     data.hIcon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
     data.szTip = wide_field("YuE2 Studio song notifications");
     if data.hIcon.is_null() {
