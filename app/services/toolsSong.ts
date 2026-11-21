@@ -48,6 +48,17 @@ export function restoredOf(songs: Derived[], songId: string): string | null {
   })?.id ?? null;
 }
 
+/** The covers made of `songId` (Create - Cover with that track), newest first: what Re-back lays its vocals over. */
+export function coversOf<T extends Derived & { created_at?: string }>(songs: T[], songId: string): T[] {
+  if (!songId) return [];
+  return songs
+    .filter(song => {
+      const derived = derivation(song);
+      return derived?.tool === 'cover' && derived.from === songId;
+    })
+    .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+}
+
 /** Why the library did not answer: its status, and its body only when it said something. */
 export function libraryFailure(status: number, body: string): string {
   const said = body.trim();

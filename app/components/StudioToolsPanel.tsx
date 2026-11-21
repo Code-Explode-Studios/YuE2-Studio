@@ -17,6 +17,7 @@ import type { TranslationKey } from '../i18n/translations';
 import { stemOf } from '../services/songStems';
 import { derivedBy, libraryFailure, restoredOf, shownSongs, toolsSongOnOpen, type ToolRun } from '../services/toolsSong';
 import { RestoreTool } from './RestoreTool';
+import { RebackTool } from './RebackTool';
 import { ConfirmDialog } from './ConfirmDialog';
 import { MidiTool } from './midi/MidiTool';
 import { MidiEditor } from './midi/MidiEditor';
@@ -433,6 +434,16 @@ export function StudioToolsPanel({ initialSongId }: { initialSongId?: string | n
           songTitle={songs.find(song => song.id === songId)?.title ?? ''}
           restoredId={restoredOf(songs, songId)}
           chosenIsRestored={derivedBy(songs.find(song => song.id === songId), 'restore')}
+          card={CARD}
+          onDone={() => void loadSongs()}
+        />
+
+        {/* Re-back: the chosen track's vocals over its instrumental cover, in its own time. */}
+        <RebackTool
+          songId={songId}
+          songTitle={songs.find(song => song.id === songId)?.title ?? ''}
+          songs={songs}
+          hasVocals={stems.includes('vocals')}
           card={CARD}
           onDone={() => void loadSongs()}
         />

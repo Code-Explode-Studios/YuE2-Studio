@@ -285,6 +285,7 @@ fn shape(name: &str, args: &Value, value: Value) -> Value {
 pub(crate) async fn status_summary() -> Value {
     let (jobs, activity, training, processing, separation) = tokio::join!(fetch("/v1/music/jobs"), fetch("/v1/activity"), fetch("/v1/training"), fetch("/v1/processing"), fetch("/v1/separation/status"));
     let (midi, engine, own, restore) = tokio::join!(fetch("/v1/midi"), fetch("/engine/options"), fetch("/setup/own-model"), fetch("/v1/restore"));
+    let reback = fetch("/v1/reback").await;
     let running_activity: Vec<Value> = activity["activity"].as_array().into_iter().flatten().filter(|entry| entry["state"] == "running").cloned().collect();
     let active_run = training["runs"].as_array().into_iter().flatten().find(|run| Some(run["id"].as_str().unwrap_or_default()) == training["active"].as_str()).map(compact_run);
     json!({
@@ -295,6 +296,7 @@ pub(crate) async fn status_summary() -> Value {
         "stems": separation["run"],
         "midi": midi["run"],
         "restore": restore["run"],
+        "reback": reback["run"],
         "preparation": compact_preparation(&training["prepare"]),
         "training": active_run,
         "processing": processing["run"],
@@ -316,6 +318,7 @@ pub(crate) fn busy(summary: &Value) -> Vec<&'static str> {
         ("stems", unfinished(&summary["stems"])),
         ("processing", unfinished(&summary["processing"])),
         ("restore", unfinished(&summary["restore"])),
+        ("reback", unfinished(&summary["reback"])),
         ("midi", unfinished(&summary["midi"]) || summary["midi"]["batch"]["queued"].as_array().is_some_and(|queued| !queued.is_empty())),
         ("preparation", summary["preparation"].is_object() && summary["preparation"]["finished"] != true),
         ("training", !summary["training"].is_null()),
@@ -390,7 +393,7 @@ fn annotations(name: &str) -> Value {
     // reads whose names the rules above miss: create_form names the create page
     const READ_NAMES: &[&str] = &["lyrics_syllables", "assistant_cli_agents", "system_gpus", "cover_scenes", "cover_photos_search", "video_backgrounds_search", "network_proxy_test", "journal_read", "score_to_midi", "score_instrumental", "score_vocal_octave", "score_from_midi", "score_mark", "lyrics_find", "cover_prompt_render", "studio_wait", "engine_presets_get", "assistant_requests_wait", "ui_console", "song_defaults", "create_form_get", "library_liked", "score_chord_bed", "song_tokenize", "score_match_sections", "models_update_plan", "problem_preview"];
     // writes over what was stored, so the earlier content is gone: a client asks first
-    const OVERWRITES: &[&str] = &["library_song_update", "playlist_update", "dataset_update", "dataset_song_update", "dataset_prepare", "lora_update", "stems_split", "restore_start", "karaoke_make", "midi_transcribe", "cover_draw", "cover_set_from_file", "openrouter_set_key", "models_update_apply"];
+    const OVERWRITES: &[&str] = &["library_song_update", "playlist_update", "dataset_update", "dataset_song_update", "dataset_prepare", "lora_update", "stems_split", "restore_start", "reback_start", "karaoke_make", "midi_transcribe", "cover_draw", "cover_set_from_file", "openrouter_set_key", "models_update_apply"];
     let changes = CHANGES.iter().any(|verb| name.split('_').any(|word| word == *verb));
     let read_only = READ_NAMES.contains(&name) || !changes && (READS.iter().any(|part| name.ends_with(part) || name.contains(&format!("{part}_"))) || name.starts_with("writing_"));
     let destructive = name.ends_with("_delete") || name.ends_with("_remove") || name == "processing_discard" || name.ends_with("_cancel") || name.contains("_cancel_") || OVERWRITES.contains(&name);
@@ -437,6 +440,8 @@ const JOURNAL: &[(&str, &str, &str)] = &[
     ("midi_transcribe", "started", "midi"),
     ("restore_start", "started", "restore"),
     ("restore_cancel", "cancelled", "restore"),
+    ("reback_start", "started", "reback"),
+    ("reback_cancel", "cancelled", "reback"),
     ("midi_cancel", "cancelled", "midi"),
     ("midi_delete", "deleted", "midi"),
     ("score_compose", "started", "score"),
@@ -561,7 +566,7 @@ fn name_source(kind: &str, args: &Value) -> Option<NameSource> {
     let listed = |path: &str, list, id: &str| NameSource { path: path.into(), list: Some((list, id.to_string())), field: "name" };
     match kind {
         "playlist" => id("playlist_id").map(|id| itself(format!("/v1/library/playlists/{}", segment(id)), "name")),
-        "song" | "generation" | "version" | "stems" | "karaoke" | "midi" | "score" | "restore" | "processing" | "cover" => {
+        "song" | "generation" | "version" | "stems" | "karaoke" | "midi" | "score" | "restore" | "reback" | "processing" | "cover" => {
             id("song_id").map(|id| itself(format!("/v1/library/songs/{}", segment(id)), "title"))
         }
         "lora" => id("lora_id").map(|id| listed("/v1/adapters", "installed", id)),
@@ -995,8 +1000,8 @@ fn tools() -> &'static [Tool] {
             },
             Tool {
                 name: "studio_wait",
-                description: "Wait for work to finish instead of polling: a song or score job (job_id), or until one kind of work is over - song_jobs, covers_and_karaoke, stems, midi, restore, processing, preparation, training - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
-                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "song_jobs", "covers_and_karaoke", "stems", "midi", "restore", "processing", "preparation", "training"] }, "seconds": { "type": "integer" } }), &[]),
+                description: "Wait for work to finish instead of polling: a song or score job (job_id), or until one kind of work is over - song_jobs, covers_and_karaoke, stems, midi, restore, reback, processing, preparation, training - or everything (until: idle, the default). Returns when it is done or after seconds (30 by default, at most 55, under the minute clients allow a call) with how far it got; call it again to keep waiting.",
+                schema: || object(json!({ "job_id": { "type": "string" }, "until": { "type": "string", "enum": ["idle", "song_jobs", "covers_and_karaoke", "stems", "midi", "restore", "reback", "processing", "preparation", "training"] }, "seconds": { "type": "integer" } }), &[]),
                 call: |_| composite("wait"),
             },
             Tool {
@@ -1836,6 +1841,35 @@ fn tools() -> &'static [Tool] {
                 description: "Stop the restoration at work, or the download for it.",
                 schema: nothing,
                 call: |_| post("/v1/restore/cancel".into(), json!({})),
+            },
+            // ---------------------------------------------------------------- re-back
+            Tool {
+                name: "reback_status",
+                description: "Re-back: whether HT-Demucs is installed to split a track that has no stems yet (separator_ready), and the re-back at work or the last one (run: song_id, cover_id, title, stage - stems, tuning, aligning, stretching, mixing, saving, done, stopped - error, report with tuning_cents, slowest, fastest and the time map, library_song).",
+                schema: nothing,
+                call: |_| get("/v1/reback".into()),
+            },
+            Tool {
+                name: "reback_start",
+                description: "Put an old recording's own vocals over a new backing track: song_id is the original, cover_id its instrumental cover made beforehand (song_create with cover_of and the instrumental score). The original's vocal stem is taken from its stems (split with HT-Demucs first when it has none); the cover is tuned to the original (tuning_cents to give it, tune false to leave it), time-warped to the original's drifting tempo by dynamic time warping on harmony and attacks (align_on stems: the original without its voice, or mix), stretched without changing pitch, and mixed under the untouched vocals (vocal_gain_db, backing_gain_db). The result becomes a new library track '<title> · re-backed' (made_from, made_by reback); the same original with the same cover again replaces it. Wait with studio_wait until reback; reback_status run.library_song names the new track.",
+                schema: || object(json!({
+                    "song_id": { "type": "string", "description": "the original recording" },
+                    "cover_id": { "type": "string", "description": "its instrumental cover" },
+                    "align_on": { "type": "string", "enum": ["stems", "mix"] },
+                    "vocal_gain_db": { "type": "number" },
+                    "backing_gain_db": { "type": "number" },
+                    "tune": { "type": "boolean" },
+                    "tuning_cents": { "type": "number", "description": "cents the original sits above the cover, instead of measuring it" },
+                    "onset_weight": { "type": "number", "description": "how much attacks count beside harmony, 0.5 by default" },
+                    "smoothing_seconds": { "type": "number", "description": "tempo changes slower than this are followed, 1 by default" }
+                }), &["song_id", "cover_id"]),
+                call: |args| post("/v1/reback/start".into(), args.clone()),
+            },
+            Tool {
+                name: "reback_cancel",
+                description: "Stop the re-back at work.",
+                schema: nothing,
+                call: |_| post("/v1/reback/cancel".into(), json!({})),
             },
             // ---------------------------------------------------------------- audio to MIDI
             Tool {

@@ -43,6 +43,7 @@ mod gpu_memory;
 mod chunked;
 mod separation;
 mod restore;
+mod reback;
 mod midi;
 mod midi_edit;
 mod score;
@@ -199,6 +200,9 @@ struct AppState {
     /// Restoring a compressed track with Apollo: the run at work or the last one, and its stop signal.
     restore_run: Arc<RwLock<Option<RestoreRun>>>,
     restore_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Re-back: the run at work or the last one, and its stop signal.
+    reback_run: Arc<RwLock<Option<reback::RebackRun>>>,
+    reback_stop: Arc<std::sync::atomic::AtomicBool>,
     /// LoRA adapters for the local engine, and the example catalogue.
     adapters: Arc<adapters::AdapterLibrary>,
     /// The processing run in progress or the last one, with its preview.
@@ -1493,6 +1497,8 @@ pub async fn serve() -> anyhow::Result<()> {
         midi_stop: Arc::new((std::sync::atomic::AtomicBool::new(false), tokio::sync::Notify::new())),
         restore_run: Arc::new(RwLock::new(None)),
         restore_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reback_run: Arc::new(RwLock::new(None)),
+        reback_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         adapters: Arc::new(adapters::AdapterLibrary::new(
             &studio_data_root().unwrap_or_else(|| std::path::PathBuf::from(".")),
             PRIMARY_MUSIC_ENGINE_ID,
@@ -1654,6 +1660,9 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/v1/restore/remove", post(remove_restore_model))
         .route("/v1/restore/cancel", post(cancel_restore))
         .route("/v1/restore/start", post(start_restore))
+        .route("/v1/reback", get(reback::status))
+        .route("/v1/reback/start", post(reback::start))
+        .route("/v1/reback/cancel", post(reback::cancel))
         .route("/v1/adapters", get(list_adapters))
         .route("/v1/adapters/import", post(import_adapter))
         .route("/v1/adapters/import-folder", post(import_adapter_folder))
