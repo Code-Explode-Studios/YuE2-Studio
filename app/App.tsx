@@ -1486,6 +1486,10 @@ function AppContent() {
                 isPlaying={isPlaying}
                 notify={showToast}
                 onSelect={handleShowDetails}
+                selectedSong={selectedSong}
+                onToggleLike={toggleLike}
+                onOpenCoverRegen={openCoverRegen}
+                onSongUpdate={handleSongUpdate}
                 onError={message => showToast(message, 'error')}
               />
             </div>
