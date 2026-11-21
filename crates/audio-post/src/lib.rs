@@ -14,6 +14,7 @@ pub mod loudness;
 pub mod mastering;
 pub mod naturalize;
 pub mod quality;
+pub mod reback;
 
 mod convolve;
 pub mod limiter;

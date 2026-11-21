@@ -267,6 +267,7 @@ move around. Check the result with `ui_screenshot`.
 - **video**: `video_open`, `video_get`, `video_set`, `video_render`, `video_play`, `video_pause`, `video_seek`, `video_close`.
 - **openrouter**: `openrouter_status`, `openrouter_set_key`, `openrouter_catalog`, `openrouter_catalog_refresh`, `openrouter_log`, `openrouter_complete`, `openrouter_cover`, `openrouter_transcribe`.
 - **restore**: `restore_status`, `restore_start` (a track or a file compressed to MP3, restored with Apollo into a new track `<title> · restored`), `restore_install`, `restore_remove`, `restore_cancel`.
+- **reback**: `reback_status`, `reback_start` (an old recording's own vocals over its instrumental cover: tuned, time-warped to the original's tempo, stretched, mixed into a new track `<title> · re-backed`), `reback_cancel`.
 
 ## Restore a track after compression
 

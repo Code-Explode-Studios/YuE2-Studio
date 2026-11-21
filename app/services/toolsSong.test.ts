@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { derivedBy, libraryFailure, restoredOf, shownSongs, toolsSongOnOpen } from './toolsSong';
+import { coversOf, derivedBy, libraryFailure, restoredOf, shownSongs, toolsSongOnOpen } from './toolsSong';
 
 describe('restoredOf and derivedBy', () => {
   const songs = [
@@ -72,5 +72,19 @@ describe('toolsSongOnOpen', () => {
 
   it('is empty without songs', () => {
     expect(toolsSongOnOpen([], [{ song_id: 'b', done: false }])).toBe('');
+  });
+});
+
+describe('coversOf', () => {
+  it('lists the covers made of the song, newest first, and nothing else', () => {
+    const songs = [
+      { id: 'a', metadata: {}, created_at: '2026-01-01' },
+      { id: 'old', metadata: { derived: { from: 'a', tool: 'cover' } }, created_at: '2026-01-02' },
+      { id: 'new', metadata: { derived: { from: 'a', tool: 'cover' } }, created_at: '2026-01-05' },
+      { id: 'stem', metadata: { derived: { from: 'a', tool: 'stems' } }, created_at: '2026-01-06' },
+      { id: 'b-cover', metadata: { derived: { from: 'b', tool: 'cover' } }, created_at: '2026-01-07' },
+    ];
+    expect(coversOf(songs, 'a').map(song => song.id)).toEqual(['new', 'old']);
+    expect(coversOf(songs, '')).toEqual([]);
   });
 });

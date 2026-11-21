@@ -39,23 +39,37 @@ impl Stft {
     }
 
     pub fn analyze(&self, x: &[f32]) -> Spectrogram {
+        let mut frames = Vec::with_capacity(self.frame_count(x.len()));
+        self.each_frame(x, |_, spectrum| frames.push(spectrum.to_vec()));
+        Spectrogram { frames, len: x.len() }
+    }
+
+    /// How many frames `analyze` makes of `len` samples.
+    pub fn frame_count(&self, len: usize) -> usize {
+        (len + 2 * self.size - self.size) / self.hop + 1
+    }
+
+    /// Where frame `f`'s window is centred, in samples of the unpadded signal.
+    pub fn frame_center(&self, f: usize) -> f64 {
+        f as f64 * self.hop as f64 - self.size as f64 / 2.0
+    }
+
+    /// The frames of `analyze` one at a time, without holding them all: for
+    /// features that keep a few numbers per frame of an hours-long track.
+    pub fn each_frame(&self, x: &[f32], mut each: impl FnMut(usize, &[Complex32])) {
         let n = self.size;
-        let padded_len = x.len() + 2 * n;
-        let count = (padded_len - n) / self.hop + 1;
-        let mut frames = Vec::with_capacity(count);
         let mut input = self.forward.make_input_vec();
-        for f in 0..count {
+        let mut output = self.forward.make_output_vec();
+        for f in 0..self.frame_count(x.len()) {
             let start = f * self.hop;
             for (i, slot) in input.iter_mut().enumerate() {
                 let p = start + i;
                 let v = if p >= n && p - n < x.len() { x[p - n] } else { 0.0 };
                 *slot = v * self.window[i];
             }
-            let mut output = self.forward.make_output_vec();
             self.forward.process(&mut input, &mut output).expect("stft frame");
-            frames.push(output);
+            each(f, &output);
         }
-        Spectrogram { frames, len: x.len() }
     }
 
     pub fn synthesize(&self, spectrogram: &Spectrogram) -> Vec<f32> {
