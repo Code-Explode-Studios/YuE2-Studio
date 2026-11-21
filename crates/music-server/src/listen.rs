@@ -137,11 +137,21 @@ pub fn hearing(hardware: &crate::hardware::Hardware, processor_chosen: bool) -> 
     }
 }
 
+/// A button that writes one style sentence doesn't need to decode several
+/// minutes of music. Listen to the middle 60 seconds on the card or 45 on the
+/// CPU, preserving the existing installed quantized model and runtime choice.
+pub fn interactive_hearing(hardware: &crate::hardware::Hardware, processor_chosen: bool) -> Hearing {
+    let mut selected = hearing(hardware, processor_chosen);
+    selected.seconds = selected.seconds.min(if selected.on_card { 60.0 } else { 45.0 });
+    selected
+}
+
 /// One run of the captioner over several songs, the way HOT-Step labels a
 /// dataset: the model loads once, and each song's caption is handed to `done`
 /// as soon as it is written, with its index. `libraries` goes first on PATH:
 /// the captioner's ggml-cuda imports cuBLAS from the engine's folder, and
 /// without it ggml would quietly run the whole model on the processor.
+/// Existing dataset preparation continues to use the full-length batch workflow.
 pub fn hear_batch(
     exe: &Path,
     moss: &Path,
@@ -149,6 +159,34 @@ pub fn hear_batch(
     libraries: Option<&Path>,
     audio: &[std::path::PathBuf],
     cancel: &std::sync::atomic::AtomicBool,
+    done: impl FnMut(usize, Result<String>),
+) -> Result<Vec<String>> {
+    hear_batch_inner(exe, moss, hearing, libraries, audio, cancel, None, done)
+}
+
+/// The interactive Create → Cover action must not hang forever waiting for a silent
+/// subprocess. The deadline starts after spawning the captioner, not during model setup.
+pub fn hear_batch_bounded(
+    exe: &Path,
+    moss: &Path,
+    hearing: &Hearing,
+    libraries: Option<&Path>,
+    audio: &[std::path::PathBuf],
+    cancel: &std::sync::atomic::AtomicBool,
+    max_runtime: std::time::Duration,
+    done: impl FnMut(usize, Result<String>),
+) -> Result<Vec<String>> {
+    hear_batch_inner(exe, moss, hearing, libraries, audio, cancel, Some(max_runtime), done)
+}
+
+fn hear_batch_inner(
+    exe: &Path,
+    moss: &Path,
+    hearing: &Hearing,
+    libraries: Option<&Path>,
+    audio: &[std::path::PathBuf],
+    cancel: &std::sync::atomic::AtomicBool,
+    max_runtime: Option<std::time::Duration>,
     mut done: impl FnMut(usize, Result<String>),
 ) -> Result<Vec<String>> {
     use std::io::BufRead;
@@ -210,18 +248,36 @@ pub fn hear_batch(
     let started_as = format!("{command:?}");
     let mut child = command.spawn().with_context(|| format!("start {}", exe.display()))?;
     let stderr = child.stderr.take().context("the captioner's messages")?;
+    // Read stderr on a separate thread. The original blocking lines() loop
+    // couldn't check cancellation or a deadline while MOSS emitted no output.
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            if send.send(line).is_err() { break; }
+        }
+    });
+    let started = std::time::Instant::now();
 
     // "[MOSS] prose   -> <base> (6.1s)": a single mode writes the bare base
     let written = Regex::new(r"^\[MOSS\]\s+prose\s+->\s+(.+?)\s+\([0-9.]+s\)\s*$").expect("valid regex");
     let mut reported = vec![false; audio.len()];
     let mut log: Vec<String> = Vec::new();
-    for line in std::io::BufReader::new(stderr).lines() {
-        let line = line.context("read the captioner's messages")?;
+    loop {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             child.kill().ok();
             child.wait().ok();
             bail!("cancelled");
         }
+        if let Some(limit) = max_runtime.filter(|limit| started.elapsed() >= *limit) {
+            child.kill().ok();
+            child.wait().ok();
+            bail!("MOSS-Music took longer than {} seconds. Check whether the captioner runs on the CPU; CUDA 13 needs an NVIDIA driver version 580 or newer.", limit.as_secs());
+        }
+        let line = match receive.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(line) => line.context("read the captioner's messages")?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         if let Some(found) = written.captures(&line) {
             let path = std::path::PathBuf::from(&found[1]);
             let index = path.file_name().and_then(|name| name.to_str()).and_then(|name| name.parse::<usize>().ok());
@@ -425,6 +481,8 @@ mod tests {
         let twelve = hearing(&card(12.0, cuda13), false);
         assert_eq!((twelve.lm, twelve.on_card), ("moss-lm-q4_k_m.gguf", true));
         assert!(twelve.seconds > 180.0 && twelve.seconds < 300.0, "{twelve:?}");
+        assert_eq!(interactive_hearing(&card(12.0, cuda13), false), Hearing { lm: "moss-lm-q4_k_m.gguf", on_card: true, seconds: 60.0 });
+        assert_eq!(interactive_hearing(&card(12.0, Some(crate::hardware::CudaBuild::Cuda12)), false), Hearing { lm: "moss-lm-q4_k_m.gguf", on_card: false, seconds: 45.0 });
         let small = Hearing { lm: "moss-lm-q4_k_m.gguf", on_card: false, seconds: PROCESSOR_SECONDS };
         assert_eq!(hearing(&card(8.0, cuda13), false), small, "not a minute fits in 8 GB");
         assert_eq!(hearing(&card(6.0, cuda13), false), small);
