@@ -10,6 +10,11 @@ export function showHubPromotions(): boolean {
   catch { return true; }
 }
 
+/** Hide unsolicited banners/popups while retaining news opened by the user. */
+export function filterHubPromotions<T extends { kind: string }>(items: T[], show: boolean): T[] {
+  return show ? items : items.filter(item => item.kind === 'news');
+}
+
 export function setHubPromotions(show: boolean): void {
   window.localStorage.setItem(HUB_PROMOTIONS_KEY, show ? '1' : '0');
   window.dispatchEvent(new Event(CHANGED));
