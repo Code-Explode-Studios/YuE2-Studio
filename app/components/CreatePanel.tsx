@@ -19,7 +19,7 @@ import { EXAMPLES, randomExample } from '../services/examples';
 import { ScoreView } from './ScoreView';
 import { MidiEditor } from './midi/MidiEditor';
 import { MidiImportDialog } from './MidiImportDialog';
-import { isMidiFile } from '../services/midiFiles';
+import { isMidiFile, MIDI_EXTENSIONS } from '../services/midiFiles';
 import { trackMidiBase64 } from '../services/midiEditor';
 import { composePlans, composeScore, transcribe, type ScorePlan } from '../services/transcription';
 import { bedLine, chordBed, failed, instrumentalScore, matchSections, type BedSection, type SectionProposal } from '../services/scoreApi';
@@ -1492,7 +1492,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
               <input
                 ref={audioFile}
                 type="file"
-                accept={AUDIO_ACCEPT}
+                accept={`${AUDIO_ACCEPT},${MIDI_EXTENSIONS.join(',')}`}
                 className="hidden"
                 onChange={event => {
                   const file = event.target.files?.[0];
@@ -1521,6 +1521,14 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
               >
                 {transcribing !== null ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
                 {transcribing !== null ? `${tt('transcribing')} · ${transcribing}` : tt('coverPickRecording')}
+              </button>
+              <button
+                type="button"
+                onClick={() => audioFile.current?.click()}
+                className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-pink-500/30 py-2 text-xs font-bold text-pink-600 transition hover:bg-pink-500/10 dark:text-pink-300"
+              >
+                <Upload size={14} />
+                MIDI (.mid)
               </button>
               <p className="mt-2 text-[11px] leading-4 text-zinc-500">{tt('coverFromLibraryHint')}</p>
               {(coverFile || coverSongId) && (
