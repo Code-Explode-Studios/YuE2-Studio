@@ -1,7 +1,12 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
-title YuE2 Studio - Local Portable Builder
+cd /d "%~dp0.."
+set "BUILD_MODE=%~1"
+if /I not "%BUILD_MODE%"=="Fast" if /I not "%BUILD_MODE%"=="Full" (
+  echo [ERROR] Expected Fast or Full build mode.
+  exit /b 2
+)
+title YuE2 Studio - %BUILD_MODE% Build
 
 rem Visual Studio's MSVC linker is usually installed, but not on PATH in a
 rem normal cmd.exe window. Prefer standard install locations; never rely on
@@ -41,7 +46,7 @@ if errorlevel 1 goto :missing_linker
 echo [YuE2] MSVC linker available:
 where link.exe
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0BUILD-YUE2-LOCAL.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build-local-windows.ps1" -Mode "%BUILD_MODE%"
 exit /b %ERRORLEVEL%
 
 :missing_vs
