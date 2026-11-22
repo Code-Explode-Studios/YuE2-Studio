@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -298,17 +298,23 @@ pub async fn set_train_after(State(state): State<AppState>, Json(request): Json<
 /// measured, and the assistant writes the style line from both - or, with no
 /// assistant, the style is what MOSS heard. For a cover of a song that came
 /// without one, an imported recording.
-pub async fn describe_song_style(State(state): State<AppState>, Path(song_id): Path<String>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct DescribeOptions {
+    #[serde(default)]
+    pub quality: listen::DescribeQuality,
+}
+
+pub async fn describe_song_style(State(state): State<AppState>, Path(song_id): Path<String>, Query(options): Query<DescribeOptions>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let song = state.library.get_song(&song_id).map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, format!("no library song {song_id}")))?;
     crate::refuse_trashed(&song)?;
     let audio = state.library.media_path_for_song(&song).ok_or_else(|| api_error(StatusCode::BAD_REQUEST, format!("{} has no audio", song.title)))?;
-    describe_style_of(&state, audio, &song.lyrics).await
+    describe_style_of(&state, audio, &song.lyrics, options.quality).await
 }
 
 /// The style of a recording the cover form took from disk (`audio` part), by
 /// ear as for a library song; `lyrics` are the form's words.
-pub async fn describe_recording_style(State(state): State<AppState>, mut multipart: axum::extract::Multipart) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+pub async fn describe_recording_style(State(state): State<AppState>, Query(options): Query<DescribeOptions>, mut multipart: axum::extract::Multipart) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let mut audio: Option<(Vec<u8>, String)> = None;
     let mut lyrics = String::new();
     while let Some(field) = multipart.next_field().await.map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))? {
@@ -329,34 +335,62 @@ pub async fn describe_recording_style(State(state): State<AppState>, mut multipa
     let extension = std::path::Path::new(&name).extension().and_then(|value| value.to_str()).unwrap_or("wav").to_ascii_lowercase();
     let path = std::env::temp_dir().join(format!("yue2-describe-{}.{extension}", uuid::Uuid::new_v4().simple()));
     tokio::fs::write(&path, &bytes).await.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("write {}: {error}", path.display())))?;
-    let described = describe_style_of(&state, path.clone(), &lyrics).await;
+    let described = describe_style_of(&state, path.clone(), &lyrics, options.quality).await;
     let _ = tokio::fs::remove_file(&path).await;
     described
 }
 
-/// Runtime diagnostics for the button, including the reason a 12 GB NVIDIA
-/// card might still be running the MOSS captioner on the CPU.
+/// Keep the existing listening-pack runtime stable for the model installer.
 pub async fn describe_style_runtime(State(state): State<AppState>) -> Json<serde_json::Value> {
+    describe_runtime(&state, listen::DescribeQuality::Fast).await
+}
+
+pub async fn describe_style_runtime_for_quality(
+    State(state): State<AppState>,
+    Query(options): Query<DescribeOptions>,
+) -> Json<serde_json::Value> {
+    describe_runtime(&state, options.quality).await
+}
+
+async fn describe_runtime(state: &AppState, quality: listen::DescribeQuality) -> Json<serde_json::Value> {
     let hardware = crate::hardware::hardware();
-    let chosen_processor = crate::processor_chosen(&state).await;
-    let runtime = listen::interactive_hearing(&hardware, chosen_processor);
+    let chosen_processor = crate::processor_chosen(state).await;
+    let q4_installed = state.training.caption_model_installed(listen::FAST_MOSS_MODEL);
+    let runtime = listen::interactive_hearing(&hardware, chosen_processor, quality, q4_installed);
     let reason = if runtime.on_card { "gpu" }
         else if chosen_processor { "processor_selected" }
         else if hardware.nvidia && hardware.card_cuda != Some(crate::hardware::CudaBuild::Cuda13) { "cuda13_unavailable" }
         else { "gpu_memory_or_backend" };
     Json(serde_json::json!({
+        "quality": if quality == listen::DescribeQuality::Fast { "fast" } else { "detailed" },
         "device": if runtime.on_card { "GPU" } else { "CPU" },
         "reason": reason,
         "gpu_name": hardware.gpu_name,
         "driver_major": hardware.driver_major,
         "model": runtime.lm,
         "seconds": runtime.seconds,
-        "installed": state.training.listen_ready(),
+        "fast_model_installed": q4_installed,
+        "installed": state.training.listening_support_ready() && state.training.caption_model_installed(runtime.lm),
     }))
 }
 
-async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: &str) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    if !state.training.listen_ready() {
+/// Only downloads Q4 after an explicit request from the user. The fast mode
+/// still works with an already installed Q8 while waiting for this download.
+pub async fn install_fast_describe_model(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    state.training.install_fast_caption_model().await
+        .map_err(|error| api_error(StatusCode::BAD_GATEWAY, format!("install fast MOSS model: {error:#}")))?;
+    Ok(Json(serde_json::json!({ "installed": true })))
+}
+
+async fn describe_style_of(
+    state: &AppState,
+    audio: std::path::PathBuf,
+    lyrics: &str,
+    quality: listen::DescribeQuality,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let fast_installed = state.training.caption_model_installed(listen::FAST_MOSS_MODEL);
+    let hearing = listen::interactive_hearing(&crate::hardware::hardware(), crate::processor_chosen(state).await, quality, fast_installed);
+    if !state.training.listening_support_ready() || !state.training.caption_model_installed(hearing.lm) {
         return Err(api_error(StatusCode::CONFLICT, "auto-describe (MOSS-Music) is not installed; install it on the training page".into()));
     }
     // the tempo is measured on the processor, on the studio's ONNX Runtime
@@ -368,8 +402,7 @@ async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: 
     let hooks = crate::card_hooks(state).await;
     (hooks.take)().await;
     crate::release_assistant_unless_kept(state).await;
-    let hearing = listen::interactive_hearing(&crate::hardware::hardware(), crate::processor_chosen(state).await);
-    studio_log!("[describe by ear] {} via {}, analysing up to {} seconds", hearing.lm, if hearing.on_card { "GPU" } else { "CPU" }, hearing.seconds);
+    studio_log!("[describe by ear] {:?}: {} via {}, analysing up to {} seconds", quality, hearing.lm, if hearing.on_card { "GPU" } else { "CPU" }, hearing.seconds);
     let heard = async {
         if hearing.on_card && crate::hardware::hardware().card_cuda == Some(crate::hardware::CudaBuild::Cuda13) {
             state.engine_runtime.install_missing(Some(crate::hardware::CudaBuild::Cuda13)).await.context("install cuBLAS for the captioner")?;
@@ -380,7 +413,7 @@ async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: 
             let facts = audio_facts::Measurer::load(&facts_dir)?.measure_mono(&audio_facts::decode(&audio)?)?;
             let cancel = AtomicBool::new(false);
             let mut caption: Option<anyhow::Result<String>> = None;
-            listen::hear_batch_bounded(&captioner, &moss, &hearing, libraries.as_deref(), std::slice::from_ref(&audio), &cancel, std::time::Duration::from_secs(240), |_, heard| caption = Some(heard))?;
+            listen::hear_batch_bounded(&captioner, &moss, &hearing, libraries.as_deref(), std::slice::from_ref(&audio), &cancel, std::time::Duration::from_secs(if quality == listen::DescribeQuality::Fast { 150 } else { 240 }), |_, heard| caption = Some(heard))?;
             let caption = caption.context("MOSS-Music wrote nothing for the song")??;
             Ok((listen::heard(&caption, &facts)?, facts))
         })
@@ -391,7 +424,9 @@ async fn describe_style_of(state: &AppState, audio: std::path::PathBuf, lyrics: 
     let (heard, facts) = heard.map_err(|error| api_error(StatusCode::BAD_GATEWAY, format!("{error:#}")))?;
 
     let note = training::HeardNote { genre: heard.genre.clone(), caption: heard.caption.clone(), bpm: facts.bpm };
-    let style = if state.assistant.read().await.available() {
+    // The quick path returns the grounded MOSS caption directly. Avoid a
+    // second model's 90-second rewrite and its possible retries.
+    let style = if quality == listen::DescribeQuality::Detailed && state.assistant.read().await.available() {
         let instrumental = lyrics.trim().is_empty();
         let written = tokio::time::timeout(
             std::time::Duration::from_secs(90),
@@ -1141,6 +1176,15 @@ async fn write_style(state: &AppState, heard: &listen::Heard, facts: &audio_fact
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_by_ear_is_fast_by_default_and_accepts_detailed_mode() {
+        let default: DescribeOptions = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.quality, listen::DescribeQuality::Fast);
+        let detailed: DescribeOptions = serde_json::from_value(serde_json::json!({"quality": "detailed"})).unwrap();
+        assert_eq!(detailed.quality, listen::DescribeQuality::Detailed);
+        assert!(serde_json::from_value::<DescribeOptions>(serde_json::json!({"quality": "bad"})).is_err());
+    }
 
     #[test]
     fn found_lyrics_taken_as_they_are_lose_only_their_times() {

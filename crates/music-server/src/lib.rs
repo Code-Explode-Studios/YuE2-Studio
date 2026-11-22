@@ -1707,6 +1707,8 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/v1/midi/runtime", get(midi_runtime))
         .route("/v1/training/pack/runtime", get(training_pack_runtime))
         .route("/v1/training/listen/runtime", get(listen_pack_runtime))
+        .route("/v1/describe-style/runtime", get(prepare::describe_style_runtime_for_quality))
+        .route("/v1/describe-style/fast-model", post(prepare::install_fast_describe_model))
         .route("/v1/midi/notes", get(midi_live_notes))
         .route("/v1/midi/install", post(install_midi))
         .route("/v1/midi/remove", post(remove_midi_model))

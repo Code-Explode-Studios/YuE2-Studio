@@ -1090,12 +1090,17 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
   };
 
   const [describing, setDescribing] = useState(false);
+  const [describeQuality, setDescribeQuality] = useState<'fast' | 'detailed'>('fast');
+  const [installingFastMoss, setInstallingFastMoss] = useState(false);
+  const [describeRuntimeVersion, setDescribeRuntimeVersion] = useState(0);
   const [describeElapsed, setDescribeElapsed] = useState(0);
   const [describeRuntime, setDescribeRuntime] = useState<{
     device: 'GPU' | 'CPU';
     seconds: number;
     reason: string;
     model: string;
+    quality: 'fast' | 'detailed';
+    fast_model_installed: boolean;
     installed: boolean;
     gpu_name: string | null;
     driver_major: number | null;
@@ -1106,7 +1111,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
       return;
     }
     const controller = new AbortController();
-    void fetch('/v1/training/listen/runtime', { signal: controller.signal })
+    void fetch(`/v1/describe-style/runtime?quality=${describeQuality}`, { signal: controller.signal })
       .then(async response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -1114,7 +1119,21 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
       .then(runtime => { if (!controller.signal.aborted) setDescribeRuntime(runtime); })
       .catch(() => { if (!controller.signal.aborted) setDescribeRuntime(null); });
     return () => controller.abort();
-  }, [mode, coverSongId, coverFile]);
+  }, [mode, coverSongId, coverFile, describeQuality, describeRuntimeVersion]);
+  const installFastMoss = async () => {
+    setInstallingFastMoss(true);
+    setError(null);
+    try {
+      const response = await fetch('/v1/describe-style/fast-model', { method: 'POST' });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(result?.error || `HTTP ${response.status}`);
+      setDescribeRuntimeVersion(version => version + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInstallingFastMoss(false);
+    }
+  };
   useEffect(() => {
     if (!describing) return;
     const started = Date.now();
@@ -1129,12 +1148,12 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
     try {
       let response: Response;
       if (coverSongId) {
-        response = await fetch(`/v1/library/songs/${encodeURIComponent(coverSongId)}/describe-style`, { method: 'POST' });
+        response = await fetch(`/v1/library/songs/${encodeURIComponent(coverSongId)}/describe-style?quality=${describeQuality}`, { method: 'POST' });
       } else {
         const form = new FormData();
         form.append('audio', coverFile!, coverFile!.name);
         form.append('lyrics', lyrics);
-        response = await fetch('/v1/describe-style', { method: 'POST', body: form });
+        response = await fetch(`/v1/describe-style?quality=${describeQuality}`, { method: 'POST', body: form });
       }
       const body = await response.json().catch(() => null);
       if (!response.ok || typeof body?.style !== 'string') throw new Error(body?.error || `HTTP ${response.status}`);
@@ -1789,14 +1808,34 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
             <p className="mt-2 text-[11px] leading-4 text-zinc-500">{tt('styleHint')}</p>
             <SongTextParts kind="style" value={style} onChange={setStyle} />
             {mode === 'cover' && (coverSongId || coverFile) && (
-              <div className="mt-2 space-y-1">
-                <button type="button" onClick={() => void describeByEar()} disabled={describing || describeRuntime?.installed === false} className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:border-pink-400 hover:text-pink-600 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300" title={tt('describeByEarHint')}>
-                  {describing ? <Loader2 size={12} className="animate-spin" /> : <Ear size={12} />}
-                  {tt('describeByEar')}
-                </button>
+              <div className="mt-2 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => void describeByEar()} disabled={describing || installingFastMoss || describeRuntime?.installed === false} className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:border-pink-400 hover:text-pink-600 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300" title={tt('describeByEarHint')}>
+                    {describing ? <Loader2 size={12} className="animate-spin" /> : <Ear size={12} />}
+                    {tt('describeByEar')}
+                  </button>
+                  <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
+                    <input type="checkbox" aria-label={tt('describeByEarDetailed')} checked={describeQuality === 'detailed'}
+                      disabled={describing || installingFastMoss} onChange={event => setDescribeQuality(event.target.checked ? 'detailed' : 'fast')}
+                      className="h-3.5 w-3.5 accent-pink-500" />
+                    {tt('describeByEarDetailed')}
+                  </label>
+                </div>
                 {describeRuntime && (
-                  <p className="text-[11px] text-zinc-500" role="status">
-                    {tt('describeByEarDevice').replace('{device}', describeRuntime.device).replace('{seconds}', String(Math.round(describeRuntime.seconds)))}
+                  <div className="space-y-1 text-[11px] text-zinc-500" role="status">
+                    <p>{tt('describeByEarDevice').replace('{device}', describeRuntime.device).replace('{seconds}', String(Math.round(describeRuntime.seconds)))}
+                      {' · '}{describeRuntime.model.includes('q4') ? 'Q4' : 'Q8'}
+                    </p>
+                    {describeQuality === 'fast' && !describeRuntime.fast_model_installed && describeRuntime.installed && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>{tt('describeByEarQ4Fallback')}</span>
+                        <button type="button" disabled={installingFastMoss || describing} onClick={() => void installFastMoss()}
+                          className="rounded border border-zinc-500/30 px-2 py-1 font-medium hover:text-pink-500 disabled:opacity-50">
+                          {installingFastMoss ? tt('describeByEarQ4Installing') : tt('describeByEarQ4Install')}
+                        </button>
+                      </div>
+                    )}
+                    {describeQuality === 'fast' && <p>{tt('describeByEarFastHint')}</p>}
                     {describeRuntime.reason === 'cuda13_unavailable' && (
                       <span className="mt-1 block text-amber-600 dark:text-amber-300">
                         {tt('describeByEarCudaWarning')}
@@ -1811,7 +1850,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
                     {!describeRuntime.installed && (
                       <span className="mt-1 block text-amber-600 dark:text-amber-300">{tt('describeByEarNotInstalled')}</span>
                     )}
-                  </p>
+                  </div>
                 )}
                 {describing && (
                   <p role="status" className="text-[11px] text-zinc-500">
