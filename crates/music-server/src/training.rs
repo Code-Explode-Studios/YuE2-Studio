@@ -671,6 +671,29 @@ impl Training {
         self.listen_files().all(|asset| self.listen_installed(asset))
     }
 
+    /// A machine may have Q8 installed for training but not Q4 for quick
+    /// interactive descriptions. Keep the optional model independent of the
+    /// training pack's existing completeness requirements.
+    pub fn caption_model_installed(&self, name: &str) -> bool {
+        listen_pack()
+            .iter()
+            .find(|asset| asset.relative_path.ends_with(name) && asset.id.starts_with("moss-lm"))
+            .is_some_and(|asset| self.listen_installed(asset))
+    }
+
+    pub fn listening_support_ready(&self) -> bool {
+        self.listen_files()
+            .filter(|asset| !asset.id.starts_with("moss-lm"))
+            .all(|asset| self.listen_installed(asset))
+    }
+
+    pub async fn install_fast_caption_model(&self) -> Result<()> {
+        let asset = listen_pack().iter().find(|asset| asset.id == "moss-lm-q4")
+            .context("fast MOSS-Music model not found in the listening pack")?;
+        if self.listen_installed(asset) { return Ok(()); }
+        self.downloader.install_all(LISTEN_SCOPE, &[asset]).await
+    }
+
     pub async fn install_listen(&self) -> Result<()> {
         let missing: Vec<&'static Asset> = self.listen_files().filter(|asset| !self.listen_installed(asset)).collect();
         if missing.is_empty() {

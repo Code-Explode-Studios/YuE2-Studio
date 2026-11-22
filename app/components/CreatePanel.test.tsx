@@ -2,6 +2,7 @@ import React, { Activity, act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Song, YueRequest } from '../types';
+import type { CreateRequest } from './CreatePanel';
 
 const composeScore = vi.fn();
 const instrumentalScore = vi.fn();
@@ -16,6 +17,7 @@ vi.mock('../services/studioQueries', () => ({
 }));
 vi.mock('../services/mcpBridge', () => ({ useBridgeCommand: () => undefined }));
 vi.mock('../services/transcription', () => ({ composeScore: (...args: unknown[]) => composeScore(...args), composePlans: vi.fn(), transcribe: vi.fn() }));
+vi.mock('../services/midiEditor', () => ({ trackMidiBase64: vi.fn(async () => '') }));
 vi.mock('../services/scoreApi', () => ({
   instrumentalScore: (abc: string) => instrumentalScore(abc),
   failed: (answer: { error?: string }) => typeof answer?.error === 'string',
@@ -62,11 +64,11 @@ afterEach(() => {
 
 const flush = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
 
-function panel(props: { initialData?: { song: Song; timestamp: number } | null; visible?: boolean }) {
+function panel(props: { initialData?: { song: Song; timestamp: number } | null; request?: CreateRequest | null; visible?: boolean }) {
   return (
     <Activity mode={props.visible === false ? 'hidden' : 'visible'}>
       <CreatePanel onGenerate={request => sent.push(request)} isGenerating={false} initialData={props.initialData ?? null}
-        playlists={[]} onCreatePlaylist={async () => null} playlistId="" onChoosePlaylist={() => undefined} />
+        request={props.request ?? null} playlists={[]} onCreatePlaylist={async () => null} playlistId="" onChoosePlaylist={() => undefined} />
     </Activity>
   );
 }
@@ -132,5 +134,40 @@ describe('Reuse prompt (#216)', () => {
     act(() => root.render(panel({ initialData: { song, timestamp: 2 } })));
     await flush();
     expect(lyrics()?.value).toContain('first words');
+  });
+});
+
+describe('Describe by ear quality', () => {
+  it('uses Fast for cover songs by default and switches to Detailed only when requested', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (resource: string, options?: RequestInit) => {
+      const uri = String(resource);
+      requests.push(uri);
+      if (uri.includes('/describe-style/runtime')) {
+        return new Response(JSON.stringify({
+          device: 'GPU', reason: 'gpu', seconds: uri.includes('detailed') ? 60 : 20,
+          model: 'moss-lm-q8_0.gguf', quality: uri.includes('detailed') ? 'detailed' : 'fast',
+          installed: true, fast_model_installed: false,
+        }), { status: 200 });
+      }
+      if (uri.includes('/describe-style')) {
+        expect(options?.method).toBe('POST');
+        return new Response(JSON.stringify({ style: 'heard style' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    }));
+    const song = { id: 'song-1', title: 'A song', style: '', lyrics: '', audioUrl: '/media/song-1' } as unknown as Song;
+    act(() => root.render(panel({ request: { id: 2, kind: 'midi', song } })));
+    await flush();
+    expect(host.querySelector('input[aria-label="describeByEarDetailed"]')).not.toBeNull();
+    click(buttonNamed('describeByEar')!);
+    await flush();
+    expect(requests).toContain('/v1/library/songs/song-1/describe-style?quality=fast');
+
+    click(host.querySelector('input[aria-label="describeByEarDetailed"]')!);
+    await flush();
+    click(buttonNamed('describeByEar')!);
+    await flush();
+    expect(requests).toContain('/v1/library/songs/song-1/describe-style?quality=detailed');
   });
 });
