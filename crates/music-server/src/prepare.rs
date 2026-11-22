@@ -356,7 +356,8 @@ async fn describe_runtime(state: &AppState, quality: listen::DescribeQuality) ->
     let hardware = crate::hardware::hardware();
     let chosen_processor = crate::processor_chosen(state).await;
     let q4_installed = state.training.caption_model_installed(listen::FAST_MOSS_MODEL);
-    let runtime = listen::interactive_hearing(&hardware, chosen_processor, quality, q4_installed);
+    let q8_installed = state.training.caption_model_installed(listen::FULL_MOSS_MODEL);
+    let runtime = listen::interactive_hearing(&hardware, chosen_processor, quality, q4_installed, q8_installed);
     let reason = if runtime.on_card { "gpu" }
         else if chosen_processor { "processor_selected" }
         else if hardware.nvidia && hardware.card_cuda != Some(crate::hardware::CudaBuild::Cuda13) { "cuda13_unavailable" }
@@ -389,7 +390,8 @@ async fn describe_style_of(
     quality: listen::DescribeQuality,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let fast_installed = state.training.caption_model_installed(listen::FAST_MOSS_MODEL);
-    let hearing = listen::interactive_hearing(&crate::hardware::hardware(), crate::processor_chosen(state).await, quality, fast_installed);
+    let detailed_installed = state.training.caption_model_installed(listen::FULL_MOSS_MODEL);
+    let hearing = listen::interactive_hearing(&crate::hardware::hardware(), crate::processor_chosen(state).await, quality, fast_installed, detailed_installed);
     if !state.training.listening_support_ready() || !state.training.caption_model_installed(hearing.lm) {
         return Err(api_error(StatusCode::CONFLICT, "auto-describe (MOSS-Music) is not installed; install it on the training page".into()));
     }

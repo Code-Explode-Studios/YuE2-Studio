@@ -156,6 +156,7 @@ pub fn interactive_hearing(
     processor_chosen: bool,
     quality: DescribeQuality,
     fast_model_installed: bool,
+    detailed_model_installed: bool,
 ) -> Hearing {
     let mut selected = hearing(hardware, processor_chosen);
     match quality {
@@ -168,6 +169,11 @@ pub fn interactive_hearing(
             selected.seconds = selected.seconds.min(20.0);
         }
         DescribeQuality::Detailed => {
+            // A user who installed only Q4 can still request a longer,
+            // assistant-polished caption without downloading Q8 as well.
+            if selected.lm == FULL_MOSS_MODEL && !detailed_model_installed && fast_model_installed {
+                selected.lm = FAST_MOSS_MODEL;
+            }
             selected.seconds = selected.seconds.min(if selected.on_card { 60.0 } else { 45.0 });
         }
     }
@@ -509,19 +515,22 @@ mod tests {
         let twelve = hearing(&card(12.0, cuda13), false);
         assert_eq!((twelve.lm, twelve.on_card), ("moss-lm-q4_k_m.gguf", true));
         assert!(twelve.seconds > 180.0 && twelve.seconds < 300.0, "{twelve:?}");
-        assert_eq!(interactive_hearing(&card(12.0, cuda13), false, DescribeQuality::Fast, true),
+        assert_eq!(interactive_hearing(&card(12.0, cuda13), false, DescribeQuality::Fast, true, false),
             Hearing { lm: FAST_MOSS_MODEL, on_card: true, seconds: 20.0 });
-        assert_eq!(interactive_hearing(&card(12.0, Some(crate::hardware::CudaBuild::Cuda12)), false, DescribeQuality::Fast, true),
+        assert_eq!(interactive_hearing(&card(12.0, Some(crate::hardware::CudaBuild::Cuda12)), false, DescribeQuality::Fast, true, false),
             Hearing { lm: FAST_MOSS_MODEL, on_card: false, seconds: 20.0 });
-        assert_eq!(interactive_hearing(&card(16.0, cuda13), false, DescribeQuality::Fast, true),
+        assert_eq!(interactive_hearing(&card(16.0, cuda13), false, DescribeQuality::Fast, true, true),
             Hearing { lm: FAST_MOSS_MODEL, on_card: true, seconds: 20.0 });
-        assert_eq!(interactive_hearing(&card(16.0, cuda13), false, DescribeQuality::Fast, false),
+        assert_eq!(interactive_hearing(&card(16.0, cuda13), false, DescribeQuality::Fast, false, true),
             Hearing { lm: FULL_MOSS_MODEL, on_card: true, seconds: 20.0 },
             "fast mode uses the installed Q8 if the optional Q4 download is absent");
-        assert_eq!(interactive_hearing(&card(16.0, cuda13), false, DescribeQuality::Detailed, true),
+        assert_eq!(interactive_hearing(&card(16.0, cuda13), false, DescribeQuality::Detailed, true, true),
             Hearing { lm: FULL_MOSS_MODEL, on_card: true, seconds: 60.0 });
-        assert_eq!(interactive_hearing(&card(12.0, cuda13), false, DescribeQuality::Detailed, false),
+        assert_eq!(interactive_hearing(&card(12.0, cuda13), false, DescribeQuality::Detailed, false, false),
             Hearing { lm: FAST_MOSS_MODEL, on_card: true, seconds: 60.0 });
+        assert_eq!(interactive_hearing(&card(16.0, cuda13), false, DescribeQuality::Detailed, true, false),
+            Hearing { lm: FAST_MOSS_MODEL, on_card: true, seconds: 60.0 },
+            "detailed mode may fall back to an installed Q4 when Q8 is absent");
         let small = Hearing { lm: "moss-lm-q4_k_m.gguf", on_card: false, seconds: PROCESSOR_SECONDS };
         assert_eq!(hearing(&card(8.0, cuda13), false), small, "not a minute fits in 8 GB");
         assert_eq!(hearing(&card(6.0, cuda13), false), small);
