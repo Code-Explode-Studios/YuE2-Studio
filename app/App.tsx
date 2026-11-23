@@ -17,6 +17,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { libraryChanged, queryClient, updateLibraryPlaylists, updateLibrarySongs, useLibraryPlaylists, useLibrarySongs, useSetupStatus } from './services/studioQueries';
 import { useGenerations } from './services/generations';
 import { sendCompletedSongsNotification } from './services/songNotifications';
+import { observeTrayPlayerActions, publishTrayPlayback } from './services/runtimeTray';
 import { SettingsModal } from './components/SettingsModal';
 import { Song, View, Playlist } from './types';
 // Resizable panel hook
@@ -961,6 +962,37 @@ function AppContent() {
       playSong(available[0], available);
     }
   };
+
+  // The background mini-player never creates another audio stream. Commands
+  // from the Windows tray are forwarded into exactly the same queue/control
+  // functions used by the main player. Keep their latest closures without
+  // resubscribing to a new Tauri event listener on every state change.
+  const trayHandlers = useRef({ next: playNext, previous: playPrevious, toggle: togglePlay });
+  trayHandlers.current = { next: playNext, previous: playPrevious, toggle: togglePlay };
+  useEffect(() => observeTrayPlayerActions(action => {
+    const winamp = winampOn() ? winampControl() : null;
+    if (winamp) {
+      const command = action === 'toggle'
+        ? { action: winamp.state().playing ? 'pause' : 'play' }
+        : { action };
+      void winamp.set(command).catch(error => console.error('[tray player]', error));
+      return;
+    }
+    if (action === 'next') trayHandlers.current.next();
+    else if (action === 'previous') trayHandlers.current.previous();
+    else trayHandlers.current.toggle();
+  }), []);
+
+  // The main audio element stays mounted when Tauri hides the window.
+  // Send metadata only when the song/playing state changes, not on each time tick.
+  useEffect(() => {
+    if (winampOn()) return; // Winamp owns playback while its own player is open.
+    void publishTrayPlayback({
+      title: currentSong?.title ?? null,
+      playing: isPlaying,
+      playable: Boolean(currentSong?.audioUrl) && !currentSong?.isGenerating,
+    });
+  }, [currentSong?.id, currentSong?.title, currentSong?.audioUrl, currentSong?.isGenerating, isPlaying]);
 
   const playSong = (song: Song, list?: Song[]) => {
     const nextQueue = list && list.length > 0
