@@ -12,6 +12,7 @@ import { isDesktop } from '../../services/externalLinks';
 import { applyUiScale, storedUiScale } from '../../services/uiScale';
 import { EQ_BANDS, equalizer, keepContextRunning, setEqualizer } from '../../services/audioGraph';
 import { addWinampSkin, pickSkin, registerWinampControl, setWinampSettings, winampSettings, winampSkins, type WinampSkin } from '../../services/winamp';
+import { publishTrayPlayback } from '../../services/runtimeTray';
 import { sharpenSkin, sharpSkinCss, skinScale } from '../../services/winampSharp';
 import { loadMilkdropPresets } from './VisualizerView';
 import { loadButterchurn } from '../../services/butterchurn';
@@ -440,11 +441,24 @@ export const WinampMode: React.FC<Props> = ({ queue, startIndex, startSeconds, p
 
       cleanups.push(webamp.onClose(exit));
       cleanups.push(webamp.onMinimize(() => void win?.minimize()));
+      let lastTrayPlayback = '';
+      const syncTrayPlayback = () => {
+        const state = store().getState();
+        const current = state.playlist.currentTrack != null ? state.tracks[state.playlist.currentTrack] : null;
+        const title = current ? current.title ?? current.defaultName : null;
+        const playing = state.media.status === 'PLAYING';
+        const signature = JSON.stringify([title, playing]);
+        if (lastTrayPlayback === signature) return;
+        lastTrayPlayback = signature;
+        void publishTrayPlayback({ title, playing, playable: Boolean(current) });
+      };
       cleanups.push(webamp.__onStateChange(() => {
         onScreenPixels();
         sharpen();
         reshape();
+        syncTrayPlayback();
       }));
+      syncTrayPlayback();
       // a menu opens outside Webamp's node, a submenu shows on hover: both change what the shape keeps
       const observer = new ResizeObserver(reshape);
       const watchAll = () => document.querySelectorAll(SHAPE).forEach((element) => observer.observe(element));

@@ -326,6 +326,22 @@ fn quit_studio(app: tauri::AppHandle) {
 const TRAY_ID: &str = "studio";
 const TRAY_OPEN: &str = "tray-open";
 const TRAY_QUIT: &str = "tray-quit";
+const TRAY_PREVIOUS: &str = "tray-previous";
+const TRAY_TOGGLE: &str = "tray-play-pause";
+const TRAY_NEXT: &str = "tray-next";
+
+/// Playback is owned by the original main webview even while its window is hidden.
+/// The tray only reflects its state and sends it playback commands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TrayPlayback {
+    title: String,
+    playing: bool,
+    playable: bool,
+}
+
+#[derive(Default)]
+struct TrayPlaybackState(std::sync::Mutex<TrayPlayback>);
+
 /// The choices only the shell needs, beside window-state.json: the service never sees them.
 const SHELL_SETTINGS_FILE: &str = "shell-settings.json";
 
@@ -408,14 +424,18 @@ enum WindowClose {
 /// the tray for a look. Either way only with the icon there to bring it back: a window with no
 /// way back would be a studio nobody can reach. Explicit quits (tray Quit, Cmd+Q, the update
 /// install, `--stop`, the idle stop) never come through the close button, so they never reach this.
-fn decide_window_close(close_to_tray: bool, tray_present: bool, headless_owned: bool) -> WindowClose {
-    if tray_present && (close_to_tray || headless_owned) { WindowClose::HideToTray } else { WindowClose::Quit }
+fn decide_window_close(close_to_tray: bool, runtime_player: bool, tray_present: bool, headless_owned: bool) -> WindowClose {
+    if tray_present && (close_to_tray || runtime_player || headless_owned) { WindowClose::HideToTray } else { WindowClose::Quit }
 }
 
 /// The tray icon is there while the setting keeps it, and in a studio started headless, where
 /// it is the only way to the window.
-fn tray_wanted(close_to_tray: bool, headless_owned: bool) -> bool {
-    close_to_tray || headless_owned
+fn tray_wanted(close_to_tray: bool, runtime_player: bool, headless_owned: bool) -> bool {
+    close_to_tray || runtime_player || headless_owned
+}
+
+fn hide_minimised_runtime_window(runtime_player: bool, tray_present: bool, minimised: bool) -> bool {
+    runtime_player && tray_present && minimised
 }
 
 /// What `--stop` does with the running studio.
@@ -492,6 +512,34 @@ fn write_close_to_tray(path: &Path, enabled: bool) -> Result<(), String> {
 fn close_to_tray_enabled() -> bool {
     read_close_to_tray(&studio_data_directory().join(SHELL_SETTINGS_FILE))
 }
+
+/// Independent of the old close-to-tray option, so disabling the mini-player
+/// restores the original behaviour rather than silently changing that setting.
+fn read_runtime_player(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .is_some_and(|saved| saved.get("runtimePlayer").and_then(serde_json::Value::as_bool) == Some(true))
+}
+
+fn write_runtime_player(path: &Path, enabled: bool) -> Result<(), String> {
+    let mut saved = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&body).ok())
+        .unwrap_or_default();
+    saved.insert("runtimePlayer".into(), enabled.into());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = path.with_extension("json.part");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&saved).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    std::fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+fn runtime_player_enabled() -> bool {
+    read_runtime_player(&studio_data_directory().join(SHELL_SETTINGS_FILE))
+}
+
 
 /// The main window in front of the person, from the tray, a second launch, or a quit question that is drawn in it.
 fn show_main_window(app: &tauri::AppHandle) {
@@ -601,44 +649,89 @@ fn quit_from_tray(app: tauri::AppHandle) {
     });
 }
 
-/// The tray menu's two items.
+/// The main webview owns the audio; never create a second audio element in
+/// the tray (which would double-play or desynchronise the queue).
 fn tray_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         TRAY_OPEN => show_main_window(app),
         TRAY_QUIT => quit_from_tray(app.clone()),
+        TRAY_PREVIOUS | TRAY_TOGGLE | TRAY_NEXT if runtime_player_enabled() => {
+            use tauri::Emitter;
+            let action = match event.id().as_ref() {
+                TRAY_PREVIOUS => "previous",
+                TRAY_TOGGLE => "toggle",
+                _ => "next",
+            };
+            let _ = app.emit_to("main", "studio://tray-player-control", serde_json::json!({ "action": action }));
+        }
         _ => {}
     }
 }
 
-fn build_tray(app: &tauri::AppHandle) -> Result<(), String> {
-    use tauri::{
-        menu::{Menu, MenuItem},
-        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    };
-    let icon = app.default_window_icon().cloned().ok_or("the studio has no icon for the tray")?;
+fn tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::Manager;
     let failed = |error: tauri::Error| error.to_string();
     let open = MenuItem::with_id(app, TRAY_OPEN, "Open YuE2 Studio", true, None::<&str>).map_err(failed)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit", true, None::<&str>).map_err(failed)?;
-    let menu = Menu::with_items(app, &[&open, &quit]).map_err(failed)?;
+    if !runtime_player_enabled() {
+        return Menu::with_items(app, &[&open, &quit]).map_err(failed);
+    }
+    let state = app.state::<TrayPlaybackState>();
+    let playback = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let title = if playback.playable { format!("Now: {}", playback.title) } else { "No song loaded".to_string() };
+    let label = MenuItem::with_id(app, "tray-track-info", title, false, None::<&str>).map_err(failed)?;
+    let previous = MenuItem::with_id(app, TRAY_PREVIOUS, "⏮ Previous track", playback.playable, None::<&str>).map_err(failed)?;
+    let play_pause = MenuItem::with_id(app, TRAY_TOGGLE, if playback.playing { "⏸ Pause" } else { "▶ Play" }, playback.playable, None::<&str>).map_err(failed)?;
+    let next = MenuItem::with_id(app, TRAY_NEXT, "⏭ Next track", playback.playable, None::<&str>).map_err(failed)?;
+    Menu::with_items(app, &[&label, &previous, &play_pause, &next, &open, &quit]).map_err(failed)
+}
+
+fn refresh_tray_menu(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let menu = tray_menu(app)?;
+        tray.set_menu(Some(menu)).map_err(|error| error.to_string())?;
+        let state = app.state::<TrayPlaybackState>();
+        let playback = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tooltip = if runtime_player_enabled() && playback.playable {
+            format!("YuE2 Studio · {}", playback.title)
+        } else {
+            "YuE2 Studio".into()
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
+    Ok(())
+}
+
+fn build_tray(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let icon = app.default_window_icon().cloned().ok_or("the studio has no icon for the tray")?;
+    let menu = tray_menu(app)?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .tooltip("YuE2 Studio")
         .menu(&menu)
-        // a click brings the window back; the menu is for the right button
+        // Left-click still restores the full studio, right-click opens controls.
         .show_menu_on_left_click(false)
-        // The menu's items are answered by `tray_menu_event`, registered once at setup: Tauri keeps a tray's menu
-        // handler among the app's global ones and never drops it, so one given here would be answered once more
-        // each time the setting brings the icon back.
+        // Register menu events globally only once at setup.
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
-            | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event
-            {
-                show_main_window(tray.app_handle());
+            match event {
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
+                | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => show_main_window(tray.app_handle()),
+                // On Windows, hovering the tray icon while the app is hidden
+                // opens the native media menu. The native menu remains clickable
+                // after the pointer leaves the tiny icon area.
+                #[cfg(target_os = "windows")]
+                TrayIconEvent::Enter { .. } if runtime_player_enabled() && !main_window_visible(tray.app_handle()) => {
+                    let _ = tray.with_inner_tray_icon(|native| native.show_menu());
+                }
+                _ => {}
             }
         })
         .build(app)
         .map(|_| ())
-        .map_err(failed)
+        .map_err(|error| error.to_string())
 }
 
 /// The tray icon there or gone. Called on the main thread only, where the icon lives.
@@ -660,7 +753,7 @@ fn apply_tray(app: &tauri::AppHandle, wanted: bool) -> Result<(), String> {
 fn sync_tray(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
     let headless_owned = app.state::<Session>().headless_owned();
-    apply_tray(app, tray_wanted(close_to_tray_enabled(), headless_owned))
+    apply_tray(app, tray_wanted(close_to_tray_enabled(), runtime_player_enabled(), headless_owned))
 }
 
 #[tauri::command]
@@ -686,6 +779,48 @@ fn set_close_to_tray(app: tauri::AppHandle, enabled: bool) -> Result<bool, Strin
         sync_tray(&app)?;
     }
     Ok(enabled)
+}
+
+/// Keeps YuE2 playing without a taskbar button, with controls in its
+/// notification-area icon. The old "Close to tray" choice remains independent.
+#[tauri::command]
+fn runtime_player() -> bool {
+    runtime_player_enabled()
+}
+
+#[tauri::command]
+fn set_runtime_player(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let path = studio_data_directory().join(SHELL_SETTINGS_FILE);
+    if enabled {
+        apply_tray(&app, true)?;
+        if let Err(error) = write_runtime_player(&path, true) {
+            let _ = sync_tray(&app);
+            return Err(error);
+        }
+    } else {
+        write_runtime_player(&path, false)?;
+        sync_tray(&app)?;
+    }
+    refresh_tray_menu(&app)?;
+    Ok(enabled)
+}
+
+/// A read-only mirror of the main player for the tray's menu labels and tooltip.
+#[tauri::command]
+fn set_tray_player_state(app: tauri::AppHandle, title: Option<String>, playing: bool, playable: bool) -> Result<(), String> {
+    use tauri::Manager;
+    let state = app.state::<TrayPlaybackState>();
+    let mut data = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let next = TrayPlayback {
+        title: title.unwrap_or_default().chars().take(75).collect(),
+        playing: playable && playing,
+        playable,
+    };
+    if *data == next { return Ok(()); }
+    *data = next;
+    drop(data);
+    if runtime_player_enabled() { refresh_tray_menu(&app)?; }
+    Ok(())
 }
 
 /// The update found at start, for a window that loaded after the event went out.
@@ -1097,6 +1232,7 @@ pub fn run() {
         )
         .manage(Prompts::default())
         .manage(Session::new(launch.headless))
+        .manage(TrayPlaybackState::default())
         .invoke_handler(tauri::generate_handler![
             open_visualizer_window,
             open_audio_editor_window,
@@ -1106,6 +1242,9 @@ pub fn run() {
             quit_studio,
             close_to_tray,
             set_close_to_tray,
+            runtime_player,
+            set_runtime_player,
+            set_tray_player_state,
             song_notifications::notify_song_ready,
             pending_update,
             install_update
@@ -1185,7 +1324,7 @@ pub fn run() {
             // The icon is there from the start when the person chose to keep the studio in the tray, and in a studio
             // started headless, where it is the only way to the window. Without it the close button quits, as it does
             // with the setting off; a headless studio is then still reached by starting it again.
-            if tray_wanted(close_to_tray_enabled(), launch.headless) {
+            if tray_wanted(close_to_tray_enabled(), runtime_player_enabled(), launch.headless) {
                 if let Err(error) = apply_tray(app.handle(), true) {
                     eprintln!("[ERROR] the tray icon could not be made, so closing the window quits: {error}");
                 }
@@ -1281,7 +1420,7 @@ pub fn run() {
                 use tauri::Manager as _;
                 api.prevent_close();
                 let headless_owned = app.state::<Session>().headless_owned();
-                match decide_window_close(close_to_tray_enabled(), app.tray_by_id(TRAY_ID).is_some(), headless_owned) {
+                match decide_window_close(close_to_tray_enabled(), runtime_player_enabled(), app.tray_by_id(TRAY_ID).is_some(), headless_owned) {
                     // hidden, not closed: the page and what is typed in it survive
                     WindowClose::HideToTray => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -1291,6 +1430,21 @@ pub fn run() {
                     WindowClose::Quit => {
                         let app = app.clone();
                         std::thread::spawn(move || confirm_quit(&app));
+                    }
+                }
+            }
+            // On Windows Runtime also treats the minimise button as "send to tray".
+            // The underlying webview stays alive, preserving the audio queue.
+            #[cfg(target_os = "windows")]
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Resized(_), .. } if label == "main" => {
+                use tauri::Manager as _;
+                if let Some(window) = app.get_webview_window("main") {
+                    if hide_minimised_runtime_window(
+                        runtime_player_enabled(),
+                        app.tray_by_id(TRAY_ID).is_some(),
+                        window.is_minimized().unwrap_or(false),
+                    ) {
+                        let _ = window.hide();
                     }
                 }
             }
@@ -1320,23 +1474,33 @@ mod tests {
 
     #[test]
     fn the_close_button_hides_with_the_setting_on_or_for_the_agent_and_only_with_the_tray_there() {
-        // close_to_tray, tray_present, headless_owned
-        assert_eq!(decide_window_close(true, true, false), WindowClose::HideToTray);
-        assert_eq!(decide_window_close(true, false, false), WindowClose::Quit, "no icon, no way back");
-        assert_eq!(decide_window_close(false, true, false), WindowClose::Quit);
-        assert_eq!(decide_window_close(false, false, false), WindowClose::Quit);
-        assert_eq!(decide_window_close(false, true, true), WindowClose::HideToTray, "the agent's studio stays, setting or not");
-        assert_eq!(decide_window_close(true, true, true), WindowClose::HideToTray);
-        assert_eq!(decide_window_close(false, false, true), WindowClose::Quit, "no icon, no way back, headless or not");
-        assert_eq!(decide_window_close(true, false, true), WindowClose::Quit);
+        // close_to_tray, runtime_player, tray_present, headless_owned
+        assert_eq!(decide_window_close(true, false, true, false), WindowClose::HideToTray);
+        assert_eq!(decide_window_close(false, true, true, false), WindowClose::HideToTray, "runtime mode hides the taskbar window");
+        assert_eq!(decide_window_close(false, true, false, false), WindowClose::Quit, "no icon, no way back");
+        assert_eq!(decide_window_close(true, false, false, false), WindowClose::Quit, "no icon, no way back");
+        assert_eq!(decide_window_close(false, false, true, false), WindowClose::Quit);
+        assert_eq!(decide_window_close(false, false, false, false), WindowClose::Quit);
+        assert_eq!(decide_window_close(false, false, true, true), WindowClose::HideToTray, "the agent's studio stays");
+        assert_eq!(decide_window_close(true, true, true, true), WindowClose::HideToTray);
+        assert_eq!(decide_window_close(false, false, false, true), WindowClose::Quit);
     }
 
     #[test]
-    fn the_tray_is_there_for_the_setting_or_for_a_headless_studio() {
-        assert!(tray_wanted(true, false));
-        assert!(tray_wanted(false, true));
-        assert!(tray_wanted(true, true));
-        assert!(!tray_wanted(false, false));
+    fn the_tray_is_there_for_close_to_tray_runtime_or_the_headless_session() {
+        assert!(tray_wanted(true, false, false));
+        assert!(tray_wanted(false, true, false));
+        assert!(tray_wanted(false, false, true));
+        assert!(tray_wanted(true, true, true));
+        assert!(!tray_wanted(false, false, false));
+    }
+
+    #[test]
+    fn runtime_minimise_hides_only_if_an_icon_can_restore_it() {
+        assert!(hide_minimised_runtime_window(true, true, true));
+        assert!(!hide_minimised_runtime_window(false, true, true));
+        assert!(!hide_minimised_runtime_window(true, false, true));
+        assert!(!hide_minimised_runtime_window(true, true, false));
     }
 
     #[test]
@@ -1395,6 +1559,23 @@ mod tests {
         assert!(!read_close_to_tray(&path), "an unreadable file is off");
         std::fs::write(&path, r#"{"closeToTray":"yes"}"#).unwrap();
         assert!(!read_close_to_tray(&path), "only a true counts");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn runtime_setting_is_off_by_default_and_preserves_existing_close_to_tray() {
+        let directory = std::env::temp_dir().join(format!("yue2-runtime-settings-{}", std::process::id()));
+        let path = directory.join(SHELL_SETTINGS_FILE);
+        assert!(!read_runtime_player(&path));
+        write_close_to_tray(&path, true).unwrap();
+        write_runtime_player(&path, true).unwrap();
+        assert!(read_close_to_tray(&path));
+        assert!(read_runtime_player(&path));
+        write_runtime_player(&path, false).unwrap();
+        assert!(read_close_to_tray(&path), "disabling Runtime must not change the old preference");
+        assert!(!read_runtime_player(&path));
+        std::fs::write(&path, r#"{"runtimePlayer":"true"}"#).unwrap();
+        assert!(!read_runtime_player(&path), "only a JSON boolean is accepted");
         std::fs::remove_dir_all(&directory).ok();
     }
 
