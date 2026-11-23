@@ -712,20 +712,20 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), String> {
         .icon(icon)
         .tooltip("YuE2 Studio")
         .menu(&menu)
-        // Left-click still restores the full studio, right-click opens controls.
+        // Left-click restores the studio. Right-click opens a native menu
+        // that Windows automatically dismisses on outside click or Escape.
         .show_menu_on_left_click(false)
         // Register menu events globally only once at setup.
         .on_tray_icon_event(|tray, event| {
             match event {
                 TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
                 | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => show_main_window(tray.app_handle()),
-                // On Windows, hovering the tray icon while the app is hidden
-                // opens the native media menu. The native menu remains clickable
-                // after the pointer leaves the tiny icon area.
-                #[cfg(target_os = "windows")]
-                TrayIconEvent::Enter { .. } if runtime_player_enabled() && !main_window_visible(tray.app_handle()) => {
-                    let _ = tray.with_inner_tray_icon(|native| native.show_menu());
-                }
+                // Do not open a native Windows context menu on mouse hover.
+                // show_menu() bypasses the normal click-driven menu lifecycle,
+                // leaving the menu stuck even after the pointer leaves or the
+                // user clicks elsewhere. Tauri's built-in right-click handler
+                // provides standard Windows dismissal behaviour. Hover still
+                // shows the current-track tooltip set by refresh_tray_menu().
                 _ => {}
             }
         })
