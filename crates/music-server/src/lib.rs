@@ -1803,6 +1803,7 @@ pub async fn serve() -> anyhow::Result<()> {
         .route("/setup/update/apply", post(setup_update_apply))
         .route("/setup/update/seen", post(setup_update_seen))
         .route("/v1/local-models/music", get(local_music_model_catalog))
+        .route("/v1/music/generation/pause", get(generation_pause_status).post(set_generation_paused))
         .route("/v1/music/jobs", post(create_music_job).get(list_active_music_jobs))
         .route("/v1/music/replay", post(replay_music_job))
         .route("/v1/transcriptions", post(create_transcription))
@@ -5882,9 +5883,9 @@ async fn pick_engine_executable() -> Result<Json<Value>, (StatusCode, Json<ApiEr
     })))
 }
 
-/// A job is running and the engine the studio started is still a running process.
+/// Queued as well as running songs keep the engine in use, including while suspended.
 async fn engine_at_work(state: &AppState) -> bool {
-    let working = state.jobs.read().await.values().any(|job| matches!(job.status, MusicJobStatus::Running));
+    let working = state.jobs.read().await.values().any(|job| matches!(job.status, MusicJobStatus::Queued | MusicJobStatus::Running));
     working && state.engine.lock().await.as_mut().is_some_and(|engine| engine.process_alive())
 }
 
@@ -10468,6 +10469,35 @@ fn describes_exhausted_ram(log: &str) -> bool {
     log.contains("bad_alloc")
 }
 
+/// The service stays responsive while its independent generation process is suspended.
+#[derive(Debug, Deserialize)]
+struct GenerationPauseRequest { paused: bool }
+
+async fn generation_is_paused(state: &AppState) -> bool {
+    state.engine.lock().await.as_mut().is_some_and(|engine| engine.process_alive() && engine.is_paused())
+}
+
+async fn generation_pause_status(State(state): State<AppState>) -> Json<Value> {
+    Json(serde_json::json!({ "paused": generation_is_paused(&state).await }))
+}
+
+async fn set_generation_paused(
+    State(state): State<AppState>,
+    Json(request): Json<GenerationPauseRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    if request.paused && !state.jobs.read().await.values().any(|job| matches!(job.status, MusicJobStatus::Queued | MusicJobStatus::Running)) {
+        return Err(api_error(StatusCode::CONFLICT, "There is no active music generation to pause.".into()));
+    }
+    let mut guard = state.engine.lock().await;
+    let engine = guard.as_mut().ok_or_else(|| api_error(StatusCode::CONFLICT, "Only a studio-owned local engine can be paused.".into()))?;
+    if !engine.process_alive() {
+        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "The local music engine is not running.".into()));
+    }
+    let paused = engine.set_paused(request.paused)
+        .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    Ok(Json(serde_json::json!({ "paused": paused })))
+}
+
 async fn create_music_job(
     State(state): State<AppState>,
     Json(request): Json<CreateMusicJobRequest>,
@@ -10591,6 +10621,9 @@ async fn submit_music_job(state: AppState, mut request: CreateMusicJobRequest, a
     };
     let stored_request = serde_json::to_value(&request).unwrap_or(Value::Null);
     let _using = state.engine_use.read().await;
+    if generation_is_paused(&state).await {
+        return (StatusCode::CONFLICT, Json(failed_request_job(request, engine_id, SongError::EngineRefused("Resume generation before submitting another song.".into()))));
+    }
     match state.music_server.submit(engine_submission(&body)).await {
         Ok(remote) => {
             let job = MusicJob {
@@ -10678,6 +10711,9 @@ async fn submit_replay_job(state: AppState, request: ReplayMusicJobRequest, atte
     let style = body.get("style").and_then(Value::as_str).unwrap_or_default().to_owned();
     let lyrics = body.get("lyrics").and_then(Value::as_str).unwrap_or_default().to_owned();
     let _using = state.engine_use.read().await;
+    if generation_is_paused(&state).await {
+        return Err(api_error(StatusCode::CONFLICT, "Resume generation before submitting a re-render.".into()));
+    }
     let remote = state
         .music_server
         .submit(engine_submission(&body))
@@ -11298,6 +11334,8 @@ async fn follow_job(state: &AppState, job_id: &str, started: &mut Option<Option<
             if matches!(existing.status, MusicJobStatus::Completed | MusicJobStatus::Failed | MusicJobStatus::Cancelled) {
                 return;
             }
+            // A paused server cannot answer job polling; never fail a suspended song for timeouts.
+            if generation_is_paused(&state).await { continue; }
             let remote = match state.music_server.job(&job_id).await {
                 Ok(remote) => {
                     unreachable = 0;
@@ -11670,6 +11708,13 @@ async fn cancel_music_job(
             eprintln!("[ERROR] the stopped song's state could not be kept: {error:#}");
         }
         return Ok(Json(job.clone()));
+    }
+    // Cancellation must remain available while paused: resume the engine first.
+    {
+        let mut supervisor = state.engine.lock().await;
+        if let Some(engine) = supervisor.as_mut().filter(|engine| engine.is_paused()) {
+            engine.set_paused(false).map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, format!("Could not resume before cancelling: {error}")))?;
+        }
     }
     let remote = state.music_server.cancel(&job_id).await.map_err(|error| {
         api_error(StatusCode::SERVICE_UNAVAILABLE, format!("the engine did not accept the cancel: {error}"))

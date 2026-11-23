@@ -439,6 +439,8 @@ pub struct StopOutcome {
 pub struct YueServerSupervisor {
     config: YueServerLaunchConfig,
     child: Option<Child>,
+    /// A paused engine keeps the running job and model state in memory.
+    paused: bool,
 }
 
 impl YueServerLocation {
@@ -517,7 +519,7 @@ impl YueServerSupervisor {
     pub fn new(config: YueServerLaunchConfig) -> Result<Self> {
         canonical_file(&config.executable, "yue-server executable")?;
         validate_loopback_host(&config.host)?;
-        Ok(Self { config, child: None })
+        Ok(Self { config, child: None, paused: false })
     }
 
     pub fn config(&self) -> &YueServerLaunchConfig {
@@ -531,6 +533,27 @@ impl YueServerSupervisor {
 
     pub fn is_healthy(&self, timeout: Duration) -> bool {
         health_check(&self.config.host, self.config.port, timeout)
+    }
+
+    /// Suspension leaves model VRAM allocated but stops the engine's GPU computation.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Only the child this studio started may be paused; an external listener is never touched.
+    pub fn set_paused(&mut self, paused: bool) -> Result<bool> {
+        self.clear_exited_child()?;
+        let child = self.child.as_ref().context("No studio-owned yue-server process to pause or resume")?;
+        if self.paused != paused {
+            set_process_suspended(child, paused)?;
+            self.paused = paused;
+            note_in_log(if paused {
+                "generation paused; GPU compute stopped (model VRAM stays allocated)"
+            } else {
+                "generation resumed from the same in-memory job"
+            });
+        }
+        Ok(self.paused)
     }
 
     /// Starts one owned server unless a healthy one already answers on the
@@ -608,6 +631,7 @@ impl YueServerSupervisor {
     /// after the grace period so no engine is left holding the card.
     pub fn stop(&mut self, grace_period: Duration) -> Result<StopOutcome> {
         let Some(child) = self.child.as_mut() else {
+            self.paused = false;
             return Ok(StopOutcome { was_running: false, graceful: true });
         };
         if let Some(status) = child.try_wait().context("inspect yue-server child")? {
@@ -616,9 +640,15 @@ impl YueServerSupervisor {
                 status.code().map(|code| format!(" (0x{:x})", code as u32)).unwrap_or_default()
             ));
             self.child = None;
+            self.paused = false;
             return Ok(StopOutcome { was_running: false, graceful: true });
         }
 
+        // A suspended process cannot receive a graceful shutdown until resumed.
+        if self.paused {
+            set_process_suspended(child, false).context("resume the paused engine before shutdown")?;
+            self.paused = false;
+        }
         let asked = request_graceful_shutdown(child);
         if let Err(error) = &asked {
             note_in_log(&format!("graceful stop was not delivered ({error}); forcing it"));
@@ -627,6 +657,7 @@ impl YueServerSupervisor {
         while Instant::now() < deadline {
             if child.try_wait().context("wait for yue-server shutdown")?.is_some() {
                 self.child = None;
+                self.paused = false;
                 return Ok(StopOutcome { was_running: true, graceful: true });
             }
             thread::sleep(Duration::from_millis(50));
@@ -634,13 +665,16 @@ impl YueServerSupervisor {
         child.kill().context("force-stop yue-server after grace period")?;
         child.wait().context("wait for force-stopped yue-server")?;
         self.child = None;
+        self.paused = false;
         Ok(StopOutcome { was_running: true, graceful: false })
     }
 
     /// Whether the engine this supervisor started is still a running process: one inside a long step can miss a
     /// health probe and still be at work.
     pub fn process_alive(&mut self) -> bool {
-        self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        let alive = self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+        if !alive { self.paused = false; }
+        alive
     }
 
     fn clear_exited_child(&mut self) -> Result<()> {
@@ -651,6 +685,7 @@ impl YueServerSupervisor {
                     status.code().map(|code| format!(" (0x{:x})", code as u32)).unwrap_or_default()
                 ));
                 self.child = None;
+                self.paused = false;
             }
         }
         Ok(())
@@ -780,6 +815,37 @@ fn configure_child_process(command: &mut Command) {
     // CTRL_BREAK reach it for a graceful stop.
     command.creation_flags(CREATE_NEW_PROCESS_GROUP);
     // The job object `adopt` assigns is what kills it with us on Windows.
+}
+
+/// Suspend the current computation without discarding its generation state.
+#[cfg(windows)]
+fn set_process_suspended(child: &Child, paused: bool) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtSuspendProcess(process: isize) -> i32;
+        fn NtResumeProcess(process: isize) -> i32;
+    }
+    let handle = child.as_raw_handle() as isize;
+    let status = unsafe { if paused { NtSuspendProcess(handle) } else { NtResumeProcess(handle) } };
+    if status != 0 {
+        bail!("Windows could not {} the engine process (NTSTATUS 0x{:08x})", if paused { "suspend" } else { "resume" }, status as u32);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_process_suspended(child: &Child, paused: bool) -> Result<()> {
+    let signal = if paused { libc::SIGSTOP } else { libc::SIGCONT };
+    if unsafe { libc::kill(child.id() as libc::pid_t, signal) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("signal yue-server to pause or resume");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn set_process_suspended(_child: &Child, _paused: bool) -> Result<()> {
+    bail!("This platform does not support pausing generation")
 }
 
 #[cfg(windows)]
