@@ -18,6 +18,7 @@ const activeJobsKey = ['music', 'jobs'] as const;
 const endedJobsKey = ['music', 'jobs', 'ended'] as const;
 const ENDED_PREFIX = 'ended_';
 const POLL_MS = 1_500;
+const generationPauseKey = ['music', 'generation', 'pause'] as const;
 const NO_SONGS: Song[] = [];
 
 const STAGE_LABEL: Record<YueProgress['stage'], string> = {
@@ -148,6 +149,14 @@ async function removeEnded(jobId: string): Promise<void> {
 export function useGenerations({ enabled, notify, onFinished, onCompleted }: GenerationOptions) {
   const { t, language } = useI18n();
   const [cards, setCards] = useState<Song[]>([]);
+  const [generationPauseBusy, setGenerationPauseBusy] = useState(false);
+  const pauseState = useQuery({
+    queryKey: generationPauseKey,
+    queryFn: () => readJson<{ paused: boolean }>('/v1/music/generation/pause'),
+    enabled,
+    refetchInterval: POLL_MS,
+  });
+  const generationPaused = pauseState.data?.paused === true;
   // job -> the rows its cards were drawn in, top to bottom; kept after the cards are gone, so the
   // songs that took the rows keep them
   const [rowsOfJob, setRowsOfJob] = useState<ReadonlyMap<string, string[]>>(() => new Map());
@@ -421,6 +430,25 @@ export function useGenerations({ enabled, notify, onFinished, onCompleted }: Gen
     }
   }, [follow, remove, notify, t, language]);
 
+  /** Freeze or thaw the owned engine process; the same generation state is retained. */
+  const setPaused = useCallback(async (paused: boolean) => {
+    setGenerationPauseBusy(true);
+    try {
+      const response = await fetch('/v1/music/generation/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paused }),
+      });
+      const result = (await response.json().catch(() => null)) as { paused?: boolean; error?: string } | null;
+      if (!response.ok || typeof result?.paused !== 'boolean') throw new Error(result?.error || `Could not ${paused ? 'pause' : 'resume'} generation (HTTP ${response.status})`);
+      queryClient.setQueryData(generationPauseKey, { paused: result.paused });
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error');
+    } finally {
+      setGenerationPauseBusy(false);
+    }
+  }, [notify]);
+
   /** A job sent from elsewhere in this window (a re-render) gets its card. */
   const track = useCallback((jobId: string, fields: CardFields) => {
     const id = `replay_${jobId}`;
@@ -530,6 +558,9 @@ export function useGenerations({ enabled, notify, onFinished, onCompleted }: Gen
     songs,
     activeJobCount: following,
     isGenerating: waiting.some(entry => entry.isGenerating),
+    generationPaused,
+    generationPauseBusy,
+    setPaused,
     generate,
     track,
     cancel,

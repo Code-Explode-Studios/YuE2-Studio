@@ -63,6 +63,9 @@ interface SongListProps {
     onScoreAgain?: (jobId: string, how: 'score-strength' | 'again') => void;
     onCancelAll?: () => void;
     onResetAll?: () => void;
+    onToggleGenerationPause?: () => void;
+    generationPaused?: boolean;
+    generationPauseBusy?: boolean;
     activeJobCount?: number;
     /** What an empty list says when nothing is searched or filtered. */
     emptyMessage?: string;
@@ -168,6 +171,9 @@ export const SongList: React.FC<SongListProps> = ({
     defaultOrder = 'newest',
     onCancelJob,
     onCancelAll,
+    onToggleGenerationPause,
+    generationPaused = false,
+    generationPauseBusy = false,
     onResetJob,
     onScoreAgain,
     onResetAll,
@@ -438,6 +444,7 @@ export const SongList: React.FC<SongListProps> = ({
             onNavigateToProfile={onNavigateToProfile}
             onSongUpdate={onSongUpdate}
             // a card can be stopped once the engine has its job
+            generationPaused={generationPaused}
             onCancelJob={(() => {
               const jobId = song.isGenerating ? song.jobId : undefined;
               return jobId ? () => onCancelJob?.(jobId) : undefined;
@@ -561,6 +568,19 @@ export const SongList: React.FC<SongListProps> = ({
                             {isSelecting ? t('hideCheckboxes') : t('select')}
                         </button>
 
+                        {activeJobCount > 0 && onToggleGenerationPause && (
+                            <button
+                                type="button"
+                                onClick={onToggleGenerationPause}
+                                disabled={generationPauseBusy}
+                                aria-pressed={generationPaused}
+                                title={t('generationPauseHint')}
+                                className="border text-xs font-bold px-4 py-2.5 rounded-lg flex items-center gap-2 transition-all select-none border-zinc-300 dark:border-white/20 text-zinc-700 dark:text-zinc-200 hover:border-pink-500 hover:text-pink-500 disabled:opacity-50"
+                            >
+                                {generationPauseBusy ? <Loader2 size={14} className="animate-spin" /> : generationPaused ? <Play size={14} /> : <Pause size={14} />}
+                                {generationPaused ? t('resumeGeneration') : t('pauseGeneration')}
+                            </button>
+                        )}
                         {activeJobCount > 0 && onCancelAll && (
                             <button
                                 onClick={() => {
@@ -801,6 +821,7 @@ interface SongItemProps {
     onNavigateToProfile?: (username: string) => void;
     onSongUpdate?: (updatedSong: Song) => void;
     onCancelJob?: () => void;
+    generationPaused?: boolean;
     onResetJob?: () => void;
     onScoreAgain?: () => void;
     /** Opens the track this one was made from; absent when it is gone. */
@@ -835,6 +856,7 @@ export const SongItem: React.FC<SongItemProps> = ({
     onNavigateToProfile,
     onSongUpdate,
     onCancelJob,
+    generationPaused = false,
     onResetJob,
     onScoreAgain,
     onOpenOriginal,
@@ -1212,7 +1234,7 @@ export const SongItem: React.FC<SongItemProps> = ({
                 {song.isGenerating ? (
                     <div className="flex flex-col items-end gap-0.5">
                         <span className={song.queuePosition ? 'text-amber-500' : 'text-pink-500'}>
-                            {song.queuePosition ? `#${song.queuePosition}` : (t(song.stage as TranslationKey) || song.stage || t('creating') || 'Creating...')}
+                            {generationPaused ? t('generationPaused') : song.queuePosition ? `#${song.queuePosition}` : (t(song.stage as TranslationKey) || song.stage || t('creating') || 'Creating...')}
                         </span>
                         {!song.queuePosition && song.stageDetail && <span className="text-[10px] text-zinc-500">{song.stageDetail}</span>}
                         {song.memoryShort && <span className="text-[10px] text-amber-500" title={t('cardMemoryShortHint')}>{t('cardMemoryShort')}</span>}

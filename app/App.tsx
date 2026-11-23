@@ -1584,6 +1584,7 @@ function AppContent() {
               <CreatePanel
                 onGenerate={generations.generate}
                 isGenerating={generations.isGenerating}
+                generationPaused={generations.generationPaused}
                 activeJobCount={generations.activeJobCount}
                 initialData={reuseData}
                 request={createRequest}
@@ -1626,6 +1627,9 @@ function AppContent() {
                 onCancelJob={generations.cancel}
                 onResetJob={generations.reset}
                 onScoreAgain={(id, how) => void generations.scoreAgain(id, how)}
+                onToggleGenerationPause={() => void generations.setPaused(!generations.generationPaused)}
+                generationPaused={generations.generationPaused}
+                generationPauseBusy={generations.generationPauseBusy}
                 onCancelAll={() => void generations.cancelAll()}
                 onResetAll={stopEverything}
                 activeJobCount={generations.activeJobCount}

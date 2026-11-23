@@ -63,6 +63,7 @@ export type CreateRequest =
 interface CreatePanelProps {
   onGenerate: (request: YueRequest) => void;
   isGenerating: boolean;
+  generationPaused?: boolean;
   activeJobCount?: number;
   initialData?: { song: Song; timestamp: number } | null;
   request?: CreateRequest | null;
@@ -398,7 +399,7 @@ const LYRIC_LANGUAGES: { code: string; native: string; name: string }[] = [
   { code: 'ko', native: '한국어', name: 'Korean' },
 ];
 
-export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerating, activeJobCount = 0, initialData, request, playlists, onCreatePlaylist, playlistId, onChoosePlaylist }) => {
+export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerating, generationPaused = false, activeJobCount = 0, initialData, request, playlists, onCreatePlaylist, playlistId, onChoosePlaylist }) => {
   const { t, language } = useI18n();
   const writingText = songWritingStrings[language];
   const tt = t as unknown as (key: string) => string;
@@ -1418,11 +1419,11 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
               <p className="mt-0.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400">{tt('localInferenceYue')}</p>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-              <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${ready ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : enginePower?.paused ? 'bg-slate-500/10 text-slate-600 dark:text-slate-300' : 'bg-amber-500/10 text-amber-700 dark:text-amber-300'}`}>
-                <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${ready ? 'bg-emerald-500' : enginePower?.paused ? 'bg-slate-400' : 'bg-amber-500'}`} />
-                {serviceDown ? t('serviceUnavailable') : enginePower?.paused ? t('enginePaused') : ready ? t('engineReady') : t('profileRequired')}
+              <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${generationPaused ? 'bg-slate-500/10 text-slate-600 dark:text-slate-300' : ready ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : enginePower?.paused ? 'bg-slate-500/10 text-slate-600 dark:text-slate-300' : 'bg-amber-500/10 text-amber-700 dark:text-amber-300'}`}>
+                <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${generationPaused ? 'bg-slate-400' : ready ? 'bg-emerald-500' : enginePower?.paused ? 'bg-slate-400' : 'bg-amber-500'}`} />
+                {serviceDown ? t('serviceUnavailable') : generationPaused ? t('generationPaused') : enginePower?.paused ? t('enginePaused') : ready ? t('engineReady') : t('profileRequired')}
               </span>
-              {setup?.ready && (enginePower?.paused || enginePower?.running) && !serviceDown && (
+              {setup?.ready && (enginePower?.paused || enginePower?.running) && !serviceDown && !generationPaused && (
                 <button type="button"
                   onClick={() => { void toggleEnginePower(); }}
                   disabled={powerBusy}
@@ -1443,6 +1444,11 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
             <div className="flex gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs leading-5 text-rose-700 dark:text-rose-200">
               <CircleAlert className="mt-0.5 shrink-0" size={15} />
               <div><b>{t('serviceUnavailable')}</b><br />{t('serviceUnavailableHint')}</div>
+            </div>
+          ) : generationPaused ? (
+            <div className="flex items-start gap-2 rounded-lg border border-slate-500/20 bg-slate-500/5 p-3 text-xs text-zinc-600 dark:text-zinc-300">
+              <Pause size={15} className="mt-0.5 shrink-0" />
+              <span>{t('generationPauseHint')}</span>
             </div>
           ) : enginePower?.paused ? (
             <div className="flex items-start gap-2 rounded-lg border border-slate-500/20 bg-slate-500/5 p-3 text-xs text-zinc-600 dark:text-zinc-300">
@@ -2382,6 +2388,7 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({ onGenerate, isGenerati
         <button
           type="button"
           onClick={submit}
+          disabled={generationPaused}
           className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-linear-to-r from-orange-500 to-pink-600 text-base font-bold text-white shadow-lg transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isGenerating ? <Square size={18} /> : instrumental ? <Guitar size={18} /> : <Sparkles size={18} />}
